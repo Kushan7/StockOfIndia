@@ -3,3 +3,27 @@
 .venv/Scripts
 *.TAG
 *.cfg
+# Python virtual environment
+.venv/
+venv/
+
+# Byte-code files
+*.pyc
+__pycache__/
+
+# Operating System files
+.DS_Store # macOS
+Thumbs.db # Windows
+
+# Editor/IDE specific files
+.vscode/ # VS Code settings
+.idea/   # PyCharm settings
+*.sublime-project
+*.sublime-workspace
+
+# Logs and other temporary files
+*.log
+*.txt # If you have temporary text files not meant for version control
+*.db # For SQLite databases if you used them, like news_database.db
+# Example for MongoDB:
+# data/db/ # If you store local MongoDB data inside the project directory (less common)
