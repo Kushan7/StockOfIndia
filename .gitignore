@@ -6,7 +6,7 @@
 # Python virtual environment
 .venv/
 venv/
-
+.idea/
 # Byte-code files
 *.pyc
 __pycache__/
