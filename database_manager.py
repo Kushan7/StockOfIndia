@@ -335,6 +335,162 @@ def scrape_economic_times_headlines(base_url, num_articles_limit=10, mongo_colle
     return all_articles_data
 
 
+# NEW: Import NLP processing functions from nlp_processor.py
+from nlp_processor import process_and_update_sentiment, process_and_update_entities
+
+# --- Finnhub API Configuration ---
+# REPLACE 'YOUR_FINNHUB_API_KEY' WITH YOUR ACTUAL FINNHUB API KEY
+import os
+from dotenv import load_dotenv
+
+# NEW: Load environment variables from .env file
+load_dotenv()
+
+# NEW: Access API Key from environment variables
+# REMOVE THE OLD HARDCODED FINNHUB_API_KEY = 'YOUR_FINNHUB_API_KEY' line
+FINNHUB_API_KEY = os.getenv('FINNHUB_API_KEY')
+FINNHUB_NEWS_BASE_URL = 'https://finnhub.io/api/v1/news'
+
+
+# --- NEW: Finnhub News Fetching Function ---
+def fetch_news_from_finnhub(api_key, mongo_collection, num_articles_limit=15):
+    """
+    Fetches financial news from Finnhub API, filters for Indian context,
+    and inserts them into MongoDB.
+    """
+    print("\n--- Phase 1 & 2: Data Collection via Finnhub API ---")
+    if mongo_collection is None:
+        print("MongoDB collection not available for Finnhub news. Aborting.")
+        return []
+
+    # Categories to fetch. 'general' covers most news, but you can also try 'forex', 'crypto' if relevant.
+    # Finnhub general news doesn't have a direct country filter, so we'll filter keywords.
+    categories = ['general']  # You can extend this, e.g., ['general', 'forex', 'crypto']
+
+    all_fetched_articles = []
+    processed_count = 0
+
+    # Keywords to filter for Indian market context
+    indian_keywords = ['india', 'indian', 'nifty', 'sensex', 'rbi', 'nse', 'bse', 'mumbai', 'delhi', 'adani',
+                       'reliance', 'tata', 'infosys', 'sbi', 'icici', 'hdfc']
+
+    for category in categories:
+        params = {
+            'category': category,
+            'token': api_key
+            # You can use 'minId' here to fetch news newer than a certain ID for incremental updates
+            # 'minId': latest_news_id_from_db # For subsequent runs
+        }
+
+        try:
+            print(f"Fetching {category} news from Finnhub...")
+            response = requests.get(FINNHUB_NEWS_BASE_URL, params=params, timeout=15)
+            response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
+            news_items = response.json()
+            print(f"Fetched {len(news_items)} news items from Finnhub for category '{category}'.")
+
+            for item in news_items:
+                # Basic filtering for Indian context based on title or summary
+                # Lowercase for case-insensitive matching
+                title_lower = item.get('headline', '').lower()
+                summary_lower = item.get('summary', '').lower()
+
+                is_indian_context = False
+                for keyword in indian_keywords:
+                    if keyword in title_lower or keyword in summary_lower:
+                        is_indian_context = True
+                        break
+
+                if not is_indian_context:
+                    continue  # Skip if no Indian keyword found
+
+                # Transform Finnhub item into our article_data format
+                article_data = {
+                    'title': item.get('headline'),
+                    'content': item.get('summary'),  # Finnhub 'summary' is often good enough as content
+                    'url': item.get('url'),
+                    'publication_date': datetime.fromtimestamp(item.get('datetime', 0)).strftime('%Y-%m-%d'),
+                    # Convert Unix timestamp to YYYY-MM-DD
+                    'source': item.get('source'),
+                    'sentiment_score': None,  # To be filled by NLP
+                    'companies_mentioned': [],  # To be filled by NLP
+                    'sectors_mentioned': []  # To be filled by NLP
+                }
+
+                # Check for mandatory fields before attempting insert
+                if not article_data['url'] or not article_data['title'] or not article_data['content']:
+                    print(
+                        f"Skipping article due to missing crucial data from Finnhub: {article_data.get('url', 'N/A')}")
+                    continue
+
+                inserted = insert_article_into_mongodb(mongo_collection, article_data)
+                if inserted:
+                    all_fetched_articles.append(article_data)  # Add to list if newly inserted
+                    processed_count += 1
+
+                if processed_count >= num_articles_limit:
+                    print(f"Reached article limit ({num_articles_limit}) for Finnhub news, stopping.")
+                    return all_fetched_articles  # Return as soon as limit is met
+
+            time.sleep(0.5)  # Be polite to API, especially if fetching multiple categories
+
+        except requests.exceptions.RequestException as e:
+            print(f"Error fetching news from Finnhub API for category '{category}': {e}")
+            print(f"Response content: {response.text[:200] if response else 'N/A'}")
+        except Exception as e:
+            print(f"An unexpected error occurred processing Finnhub news for category '{category}': {e}")
+
+    print(f"Finnhub news collection complete. Inserted {processed_count} new/updated articles.")
+    return all_fetched_articles
+
+
+# --- Web Scraping Functions (Keep for now, but will be removed from main execution) ---
+# (Keep get_html_content, parse_article_page, scrape_economic_times_headlines as is for now)
+# (You can remove scrape_economic_times_headlines entirely once you're confident in Finnhub data)
+
+# --- MongoDB Integration Functions (Keep as is) ---
+# (Keep connect_to_mongodb, insert_article_into_mongodb as is)
+
+# --- Main Execution Block (Modified for Finnhub) ---
+if __name__ == "__main__":
+    print("Starting news processing pipeline with Finnhub API and MongoDB integration...")
+
+    mongo_collection = connect_to_mongodb(db_name='indian_market_scanner_db', collection_name='news_articles')
+
+    if mongo_collection is not None:
+        print("\nMongoDB connection established for all processes.")
+
+        # Phase 1 & 2: Data Collection via Finnhub API
+        # Replacing the old scraper with the new Finnhub function
+        finnhub_news_summary = fetch_news_from_finnhub(
+            api_key=FINNHUB_API_KEY,
+            mongo_collection=mongo_collection,
+            num_articles_limit=30  # Increased limit to get more Finnhub data for testing
+        )
+        if finnhub_news_summary:
+            print(
+                f"\nFinnhub news collection complete. Processed {len(finnhub_news_summary)} articles for database insertion/update.")
+        else:
+            print("No new articles fetched from Finnhub or an error occurred during collection.")
+
+        # Phase 3a: Sentiment Analysis
+        print("\n--- Phase 3a: Sentiment Analysis ---")
+        process_and_update_sentiment(mongo_collection)
+
+        # Phase 3b: Entity and Sector Recognition
+        print("\n--- Phase 3b: Entity and Sector Recognition ---")
+        process_and_update_entities(mongo_collection)
+
+    else:
+        print("\nFailed to connect to MongoDB. All processing aborted.")
+
+    print(
+        "\nProject execution complete. Check your MongoDB for updated sentiment scores and identified entities/sectors.")
+    print(
+        "To view data in MongoDB Compass: connect to localhost:27017, then navigate to indian_market_scanner_db > news_articles.")
+    print(
+        "To view data in mongosh: `use indian_market_scanner_db` then `db.news_articles.find({'sentiment_score': {'$ne': null}}).pretty()`")
+
 # --- Main Execution Block ---
 if __name__ == "__main__":
     print("Starting news scraping, sentiment analysis, and entity recognition with MongoDB integration...")

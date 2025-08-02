@@ -3,6 +3,7 @@
 .venv/Scripts
 *.TAG
 *.cfg
+.env
 # Python virtual environment
 .venv/
 venv/
