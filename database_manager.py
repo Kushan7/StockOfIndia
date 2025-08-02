@@ -84,7 +84,7 @@ def parse_article_page(article_url):
     full_content_parts = []
 
     # PRIORITIZE THE 'arttextmedium' CLASS
-    main_content_div = soup.find('div', class_='arttextmedium')
+    main_content_div = soup.find('div', class_='artText medium')
 
     # Fallback to general article body selectors if 'arttextmedium' is not found (for older/different pages)
     if not main_content_div:
