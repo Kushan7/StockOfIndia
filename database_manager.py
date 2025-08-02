@@ -35,12 +35,16 @@ def get_html_content(url, retries=3, delay=2):
     return None
 
 
+# In your database_manager.py file
+
+# ... (rest of parse_article_page function before content extraction, including imports) ...
+
 def parse_article_page(article_url):
     """
     Parses a single Economic Times article page to extract title, date, and content.
     """
     print(f"Scraping article: {article_url}")
-    html_content = get_html_content(article_url)  # get_html_content is defined elsewhere in database_manager.py
+    html_content = get_html_content(article_url)
     if not html_content:
         return None
 
@@ -48,21 +52,18 @@ def parse_article_page(article_url):
 
     title = ""
     date = ""
-    content = []  # This will store parts of the article text
 
     # --- Extract Title ---
-    # Try multiple common selectors for titles on ET article pages
-    title_element = soup.find('h1', {'class': 'artTitle'})  # Main title class
+    title_element = soup.find('h1', {'class': 'artTitle'})
     if not title_element:
-        title_element = soup.find('h1', {'class': 'article_title'})  # Another possible title class
+        title_element = soup.find('h1', {'class': 'article_title'})
     if not title_element:
-        title_element = soup.find('h1')  # Fallback to any h1
+        title_element = soup.find('h1')
 
     if title_element:
         title = title_element.get_text(strip=True)
 
-    # --- Extract Date (less critical here, as we get better date from listing page, but good to have fallback) ---
-    # Dates are often in span/div with specific classes, or within meta tags
+    # --- Extract Date ---
     date_element = soup.find('time', {'class': 'publishedAt'})
     if not date_element:
         date_element = soup.find('div', {'class': 'publish_on'})
@@ -71,7 +72,6 @@ def parse_article_page(article_url):
 
     if date_element:
         date = date_element.get_text(strip=True)
-        # Use regex to extract just the date part if needed
         match = re.search(r'\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},\s+\d{4}', date)
         if match:
             date = match.group(0)
@@ -80,20 +80,21 @@ def parse_article_page(article_url):
             if match:
                 date = match.group(0)
 
-    # --- Extract Article Content (IMPROVED SECTION) ---
-    full_content_parts = []  # Use a new list to avoid conflict with 'content' variable above
+    # --- Extract Article Content (REFINED SECTION based on new screenshot) ---
+    full_content_parts = []
 
-    # Target the main content div based on your screenshot inspection
-    # It seems to be a div with class 'arttext' or '_3YqBf' (ET often uses multiple classes)
-    main_content_div = soup.find('div', class_=lambda x: x and ('arttext' in x.split() or '_3YqBf' in x.split()))
+    # PRIORITIZE THE 'arttextmedium' CLASS
+    main_content_div = soup.find('div', class_='arttextmedium')
 
-    # Fallback to general article body selectors if the above is not found
+    # Fallback to general article body selectors if 'arttextmedium' is not found (for older/different pages)
+    if not main_content_div:
+        main_content_div = soup.find('div', class_=lambda x: x and ('arttext' in x.split() or '_3YqBf' in x.split()))
     if not main_content_div:
         main_content_div = soup.find('div', {'class': 'Normal'})
     if not main_content_div:
         main_content_div = soup.find('div', {'class': 'article_body'})
     if not main_content_div:
-        main_content_div = soup.find('section', {'itemprop': 'articleBody'})  # Common schema.org pattern
+        main_content_div = soup.find('section', {'itemprop': 'articleBody'})
 
     if main_content_div:
         # Get all text nodes within the main content container
@@ -107,20 +108,20 @@ def parse_article_page(article_url):
                     not stripped_text.lower().startswith("also read:") and \
                     not stripped_text.lower().startswith("download the economic times app") and \
                     not stripped_text.lower().startswith("by downloading the app") and \
-                    not stripped_text.lower().startswith(
-                        "follow us on"):  # Add more common junk filters as you find them
+                    not stripped_text.lower().startswith("follow us on") and \
+                    not stripped_text.lower().startswith("join us on"):  # Added another common filter
                 full_content_parts.append(stripped_text)
 
     # Join the collected parts into a single string for the 'content' field
     full_content_str = "\n".join(full_content_parts)
 
-    if not title and not full_content_str:  # Check full_content_str, not the temporary 'content' list
+    if not title and not full_content_str:
         print(f"Warning: Could not extract significant content from {article_url}. Title and content are empty.")
         return None
 
     return {
         'title': title,
-        'date': date,  # This will be overridden by the more accurate date from the listing page
+        'date': date,
         'content': full_content_str,
         'url': article_url,
         'source': 'Economic Times'
