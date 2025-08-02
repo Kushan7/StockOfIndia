@@ -39,6 +39,10 @@ def get_html_content(url, retries=3, delay=2):
 
 # ... (rest of parse_article_page function before content extraction, including imports) ...
 
+# In your database_manager.py file
+
+# ... (keep all imports at the top: requests, BeautifulSoup, time, re, datetime, pymongo, etc.) ...
+
 def parse_article_page(article_url):
     """
     Parses a single Economic Times article page to extract title, date, and content.
@@ -80,39 +84,46 @@ def parse_article_page(article_url):
             if match:
                 date = match.group(0)
 
-    # --- Extract Article Content (REFINED SECTION based on new screenshot) ---
+    # --- Extract Article Content (REFINED STRATEGY - Broadened Search) ---
     full_content_parts = []
 
-    # PRIORITIZE THE 'arttextmedium' CLASS
-    main_content_div = soup.find('div', class_='artText medium')
+    # Look for a common parent container that holds all variations of article text divs
+    # 'artdata' class seems to be a good candidate as seen in previous inspections/paths
+    article_data_container = soup.find('div', class_=lambda x: x and 'artdata' in x.split())
 
-    # Fallback to general article body selectors if 'arttextmedium' is not found (for older/different pages)
-    if not main_content_div:
-        main_content_div = soup.find('div', class_=lambda x: x and ('arttext' in x.split() or '_3YqBf' in x.split()))
-    if not main_content_div:
-        main_content_div = soup.find('div', {'class': 'Normal'})
-    if not main_content_div:
-        main_content_div = soup.find('div', {'class': 'article_body'})
-    if not main_content_div:
-        main_content_div = soup.find('section', {'itemprop': 'articleBody'})
+    # Fallback to pagecontent which seems to hold the entire main content area
+    if not article_data_container:
+        article_data_container = soup.find('div', id='pagecontent')
+        if article_data_container:  # If pagecontent exists, look for its direct content wrapper
+            article_data_container = article_data_container.find('div', class_='pagecontent_fit')
 
-    if main_content_div:
-        # Get all text nodes within the main content container
-        all_text_elements = main_content_div.find_all(text=True)
+    if article_data_container:
+        # Find all divs and p tags within this broader container that might hold content.
+        # This will capture both 'arttextmedium', 'arttext', and any direct paragraphs.
+        text_containing_elements = article_data_container.find_all(['div', 'p'])
 
-        for element in all_text_elements:
-            stripped_text = element.strip()
-            # Filter out short strings, common non-content, or navigation/ad text
-            if len(stripped_text) > 50 and \
-                    not stripped_text.lower().startswith("read more:") and \
-                    not stripped_text.lower().startswith("also read:") and \
-                    not stripped_text.lower().startswith("download the economic times app") and \
-                    not stripped_text.lower().startswith("by downloading the app") and \
-                    not stripped_text.lower().startswith("follow us on") and \
-                    not stripped_text.lower().startswith("join us on"):  # Added another common filter
-                full_content_parts.append(stripped_text)
+        for element in text_containing_elements:
+            # Check for specific classes that typically indicate main content blocks
+            classes = element.get('class', [])
+            if 'arttextmedium' in classes or 'arttext' in classes or element.name == 'p':
+                # Get all text within this specific element, separated by spaces for readability
+                text_chunk = element.get_text(separator=' ', strip=True)
 
-    # Join the collected parts into a single string for the 'content' field
+                # Apply robust filtering to clean out non-content text
+                if len(text_chunk) > 50 and \
+                        not text_chunk.lower().startswith("read more:") and \
+                        not text_chunk.lower().startswith("also read:") and \
+                        not text_chunk.lower().startswith("download the economic times app") and \
+                        not text_chunk.lower().startswith("by downloading the app") and \
+                        not text_chunk.lower().startswith("follow us on") and \
+                        not text_chunk.lower().startswith("join us on") and \
+                        not text_chunk.lower().startswith("view more") and \
+                        not text_chunk.lower().startswith("watch now") and \
+                        not text_chunk.lower().startswith("trending now"):  # Added more common junk filters
+
+                    full_content_parts.append(text_chunk)
+
+    # Join the collected parts into a single string
     full_content_str = "\n".join(full_content_parts)
 
     if not title and not full_content_str:
