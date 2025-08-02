@@ -338,39 +338,49 @@ def scrape_economic_times_headlines(base_url, num_articles_limit=10, mongo_colle
 # NEW: Import NLP processing functions from nlp_processor.py
 from nlp_processor import process_and_update_sentiment, process_and_update_entities
 
-# --- Finnhub API Configuration ---
-# REPLACE 'YOUR_FINNHUB_API_KEY' WITH YOUR ACTUAL FINNHUB API KEY
+# database_manager.py
+
+# All imports for database_manager.py
+import requests
+# BeautifulSoup is likely only needed if you still have parse_article_page for old data.
+# If you fully switch to APIs, you can remove it.
+from bs4 import BeautifulSoup
+import time
+import re
+from datetime import datetime
+import pymongo
+from pymongo.errors import ConnectionFailure, DuplicateKeyError
+
 import os
 from dotenv import load_dotenv
 
-# NEW: Load environment variables from .env file
 load_dotenv()
 
-# NEW: Access API Key from environment variables
-# REMOVE THE OLD HARDCODED FINNHUB_API_KEY = 'YOUR_FINNHUB_API_KEY' line
+# --- API Keys Configuration ---
 FINNHUB_API_KEY = os.getenv('FINNHUB_API_KEY')
+MARKETAUX_API_KEY = os.getenv('MARKETAUX_API_KEY')  # NEW: Marketaux API Key
+
 FINNHUB_NEWS_BASE_URL = 'https://finnhub.io/api/v1/news'
+# NEW: Marketaux API Base URL
+MARKETAUX_NEWS_BASE_URL = 'https://api.marketaux.com/v1/news/all'
 
 
-# --- NEW: Finnhub News Fetching Function ---
+# --- Existing: Finnhub News Fetching Function (keep as is) ---
 def fetch_news_from_finnhub(api_key, mongo_collection, num_articles_limit=15):
+    # ... (content of this function remains exactly the same as before) ...
     """
     Fetches financial news from Finnhub API, filters for Indian context,
     and inserts them into MongoDB.
     """
-    print("\n--- Phase 1 & 2: Data Collection via Finnhub API ---")
+    print("\n--- Data Collection via Finnhub API ---")  # Simplified print
     if mongo_collection is None:
         print("MongoDB collection not available for Finnhub news. Aborting.")
         return []
 
-    # Categories to fetch. 'general' covers most news, but you can also try 'forex', 'crypto' if relevant.
-    # Finnhub general news doesn't have a direct country filter, so we'll filter keywords.
-    categories = ['general']  # You can extend this, e.g., ['general', 'forex', 'crypto']
-
+    categories = ['general']
     all_fetched_articles = []
     processed_count = 0
 
-    # Keywords to filter for Indian market context
     indian_keywords = ['india', 'indian', 'nifty', 'sensex', 'rbi', 'nse', 'bse', 'mumbai', 'delhi', 'adani',
                        'reliance', 'tata', 'infosys', 'sbi', 'icici', 'hdfc']
 
@@ -378,20 +388,16 @@ def fetch_news_from_finnhub(api_key, mongo_collection, num_articles_limit=15):
         params = {
             'category': category,
             'token': api_key
-            # You can use 'minId' here to fetch news newer than a certain ID for incremental updates
-            # 'minId': latest_news_id_from_db # For subsequent runs
         }
 
         try:
             print(f"Fetching {category} news from Finnhub...")
             response = requests.get(FINNHUB_NEWS_BASE_URL, params=params, timeout=15)
-            response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
+            response.raise_for_status()
             news_items = response.json()
             print(f"Fetched {len(news_items)} news items from Finnhub for category '{category}'.")
 
             for item in news_items:
-                # Basic filtering for Indian context based on title or summary
-                # Lowercase for case-insensitive matching
                 title_lower = item.get('headline', '').lower()
                 summary_lower = item.get('summary', '').lower()
 
@@ -402,22 +408,19 @@ def fetch_news_from_finnhub(api_key, mongo_collection, num_articles_limit=15):
                         break
 
                 if not is_indian_context:
-                    continue  # Skip if no Indian keyword found
+                    continue
 
-                # Transform Finnhub item into our article_data format
                 article_data = {
                     'title': item.get('headline'),
-                    'content': item.get('summary'),  # Finnhub 'summary' is often good enough as content
+                    'content': item.get('summary'),
                     'url': item.get('url'),
                     'publication_date': datetime.fromtimestamp(item.get('datetime', 0)).strftime('%Y-%m-%d'),
-                    # Convert Unix timestamp to YYYY-MM-DD
                     'source': item.get('source'),
-                    'sentiment_score': None,  # To be filled by NLP
-                    'companies_mentioned': [],  # To be filled by NLP
-                    'sectors_mentioned': []  # To be filled by NLP
+                    'sentiment_score': None,
+                    'companies_mentioned': [],
+                    'sectors_mentioned': []
                 }
 
-                # Check for mandatory fields before attempting insert
                 if not article_data['url'] or not article_data['title'] or not article_data['content']:
                     print(
                         f"Skipping article due to missing crucial data from Finnhub: {article_data.get('url', 'N/A')}")
@@ -425,14 +428,14 @@ def fetch_news_from_finnhub(api_key, mongo_collection, num_articles_limit=15):
 
                 inserted = insert_article_into_mongodb(mongo_collection, article_data)
                 if inserted:
-                    all_fetched_articles.append(article_data)  # Add to list if newly inserted
+                    all_fetched_articles.append(article_data)
                     processed_count += 1
 
                 if processed_count >= num_articles_limit:
                     print(f"Reached article limit ({num_articles_limit}) for Finnhub news, stopping.")
-                    return all_fetched_articles  # Return as soon as limit is met
+                    return all_fetched_articles
 
-            time.sleep(0.5)  # Be polite to API, especially if fetching multiple categories
+            time.sleep(0.5)
 
         except requests.exceptions.RequestException as e:
             print(f"Error fetching news from Finnhub API for category '{category}': {e}")
@@ -444,16 +447,117 @@ def fetch_news_from_finnhub(api_key, mongo_collection, num_articles_limit=15):
     return all_fetched_articles
 
 
-# --- Web Scraping Functions (Keep for now, but will be removed from main execution) ---
-# (Keep get_html_content, parse_article_page, scrape_economic_times_headlines as is for now)
-# (You can remove scrape_economic_times_headlines entirely once you're confident in Finnhub data)
+# --- NEW: Marketaux News Fetching Function ---
+def fetch_news_from_marketaux(api_key, mongo_collection, num_articles_limit=15):
+    """
+    Fetches financial news from Marketaux API, filters for Indian context,
+    and inserts them into MongoDB.
+    Marketaux often has a 'countries' filter which is very useful.
+    """
+    print("\n--- Data Collection via Marketaux API ---")
+    if mongo_collection is None:
+        print("MongoDB collection not available for Marketaux news. Aborting.")
+        return []
 
-# --- MongoDB Integration Functions (Keep as is) ---
-# (Keep connect_to_mongodb, insert_article_into_mongodb as is)
+    all_fetched_articles = []
+    processed_count = 0
 
-# --- Main Execution Block (Modified for Finnhub) ---
+    # Marketaux allows filtering by country directly!
+    # Common financial keywords might still be useful to narrow down,
+    # or you can use their 'industries' or 'sectors' parameters if available.
+
+    # We will use 'search' parameter for keywords like Nifty/Sensex
+    # And 'countries' for 'in' (India)
+    params = {
+        'api_token': api_key,
+        'countries': 'in',  # Direct filter for India
+        'limit': 100,  # Max number of articles per request (adjust based on your plan)
+        'sort': 'published_desc'  # Sort by latest
+        # Marketaux also has 'published_before', 'published_after' for date range
+        # and 'offset' for pagination to get more articles.
+    }
+
+    try:
+        print("Fetching news from Marketaux...")
+        response = requests.get(MARKETAUX_NEWS_BASE_URL, params=params, timeout=15)
+        response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
+
+        json_data = response.json()
+        news_items = json_data.get('data', [])  # Marketaux returns data under 'data' key
+
+        print(f"Fetched {len(news_items)} news items from Marketaux.")
+
+        for item in news_items:
+            # Marketaux fields: 'title', 'description', 'url', 'published_at', 'source', etc.
+            # 'description' is usually a good candidate for content.
+
+            # Convert 'published_at' (ISO format string) to YYYY-MM-DD
+            published_date_str = None
+            if item.get('published_at'):
+                try:
+                    # Example: "2023-10-27T10:00:00.000000Z"
+                    dt_object = datetime.fromisoformat(item['published_at'].replace('Z', '+00:00'))
+                    published_date_str = dt_object.strftime('%Y-%m-%d')
+                except ValueError:
+                    print(f"Warning: Could not parse Marketaux date '{item['published_at']}'. Storing as raw string.")
+                    published_date_str = item['published_at']
+
+            article_data = {
+                'title': item.get('title'),
+                'content': item.get('description'),  # Using 'description' as main content
+                'url': item.get('url'),
+                'publication_date': published_date_str,
+                'source': item.get('source'),
+                'sentiment_score': None,
+                'companies_mentioned': [],
+                'sectors_mentioned': []
+            }
+
+            if not article_data['url'] or not article_data['title'] or not article_data['content']:
+                print(f"Skipping article due to missing crucial data from Marketaux: {article_data.get('url', 'N/A')}")
+                continue
+
+            inserted = insert_article_into_mongodb(mongo_collection, article_data)
+            if inserted:
+                all_fetched_articles.append(article_data)  # Add to list if newly inserted
+                processed_count += 1
+
+            if processed_count >= num_articles_limit:
+                print(f"Reached article limit ({num_articles_limit}) for Marketaux news, stopping.")
+                return all_fetched_articles
+
+        time.sleep(0.5)  # Be polite to API
+
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching news from Marketaux API: {e}")
+        print(f"Response content: {response.text[:200] if response else 'N/A'}")
+    except Exception as e:
+        print(f"An unexpected error occurred processing Marketaux news: {e}")
+
+    print(f"Marketaux news collection complete. Inserted {processed_count} new/updated articles.")
+    return all_fetched_articles
+
+
+# --- Web Scraping Functions (Keep these for now, if you wish to retain the scraper, otherwise remove them) ---
+# (get_html_content, parse_article_page, scrape_economic_times_headlines)
+# ...
+
+# --- MongoDB Integration Functions (connect_to_mongodb, insert_article_into_mongodb) ---
+# ... (these remain unchanged) ...
+
+# --- Main Execution Block (Modified to call both Finnhub and Marketaux) ---
 if __name__ == "__main__":
-    print("Starting news processing pipeline with Finnhub API and MongoDB integration...")
+    print("Starting news processing pipeline with Finnhub/Marketaux APIs and MongoDB integration...")
+
+    # Check if API keys are loaded
+    if not FINNHUB_API_KEY:
+        print("Error: FINNHUB_API_KEY not found in .env file or environment variables.")
+        print("Please ensure you have FINNHUB_API_KEY=YOUR_KEY_HERE in your .env file.")
+        exit(1)
+    if not MARKETAUX_API_KEY:  # NEW: Check Marketaux API key
+        print("Error: MARKETAUX_API_KEY not found in .env file or environment variables.")
+        print("Please ensure you have MARKETAUX_API_KEY=YOUR_KEY_HERE in your .env file.")
+        exit(1)
 
     mongo_collection = connect_to_mongodb(db_name='indian_market_scanner_db', collection_name='news_articles')
 
@@ -461,17 +565,26 @@ if __name__ == "__main__":
         print("\nMongoDB connection established for all processes.")
 
         # Phase 1 & 2: Data Collection via Finnhub API
-        # Replacing the old scraper with the new Finnhub function
         finnhub_news_summary = fetch_news_from_finnhub(
             api_key=FINNHUB_API_KEY,
             mongo_collection=mongo_collection,
-            num_articles_limit=30  # Increased limit to get more Finnhub data for testing
+            num_articles_limit=20  # Adjust limit for each source as per your free tier/needs
         )
         if finnhub_news_summary:
-            print(
-                f"\nFinnhub news collection complete. Processed {len(finnhub_news_summary)} articles for database insertion/update.")
+            print(f"\nFinnhub news collection complete. Processed {len(finnhub_news_summary)} articles.")
         else:
             print("No new articles fetched from Finnhub or an error occurred during collection.")
+
+        # NEW: Phase 1 & 2: Data Collection via Marketaux API
+        marketaux_news_summary = fetch_news_from_marketaux(
+            api_key=MARKETAUX_API_KEY,
+            mongo_collection=mongo_collection,
+            num_articles_limit=20  # Adjust limit
+        )
+        if marketaux_news_summary:
+            print(f"\nMarketaux news collection complete. Processed {len(marketaux_news_summary)} articles.")
+        else:
+            print("No new articles fetched from Marketaux or an error occurred during collection.")
 
         # Phase 3a: Sentiment Analysis
         print("\n--- Phase 3a: Sentiment Analysis ---")
@@ -490,7 +603,6 @@ if __name__ == "__main__":
         "To view data in MongoDB Compass: connect to localhost:27017, then navigate to indian_market_scanner_db > news_articles.")
     print(
         "To view data in mongosh: `use indian_market_scanner_db` then `db.news_articles.find({'sentiment_score': {'$ne': null}}).pretty()`")
-
 # --- Main Execution Block ---
 if __name__ == "__main__":
     print("Starting news scraping, sentiment analysis, and entity recognition with MongoDB integration...")
