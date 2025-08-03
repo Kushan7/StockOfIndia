@@ -35,9 +35,17 @@ def get_html_content(url, retries=3, delay=2):
     return None
 
 
+# et_news_scraper.py
+
+# ... (imports: requests, BeautifulSoup, time, re, datetime, etc. should be at the top) ...
+
+
+
+
 def parse_article_page(article_url):
     """
     Parses a single Economic Times article page to extract title, date, and content.
+    Includes enhanced filtering for common non-content fragments.
     """
     print(f"Scraping article: {article_url}")
     html_content = get_html_content(article_url)
@@ -76,7 +84,7 @@ def parse_article_page(article_url):
             if match:
                 date = match.group(0)
 
-    # --- Extract Article Content (REFINED STRATEGY - Broadened Search) ---
+    # --- Extract Article Content (REFINED STRATEGY - Broadened Search & Enhanced Filtering) ---
     full_content_parts = []
 
     article_data_container = soup.find('div', class_=lambda x: x and 'artdata' in x.split())
@@ -87,24 +95,49 @@ def parse_article_page(article_url):
             article_data_container = article_data_container.find('div', class_='pagecontent_fit')
 
     if article_data_container:
-        text_containing_elements = article_data_container.find_all(['div', 'p'])
+        # Find all divs and p tags within this broader container that might hold content.
+        text_containing_elements = article_data_container.find_all(
+            ['div', 'p', 'span', 'strong'])  # Added span and strong
+
+        # Compile common non-content phrases for more efficient filtering
+        # These are case-insensitive
+        non_content_starters = (
+            "read more:", "also read:", "download the economic times app",
+            "by downloading the app", "follow us on", "join us on",
+            "view more", "watch now", "trending now",
+            "et prime", "to see how", "track live", "go to the", "for full story",
+            "terms of use", "privacy policy", "cookie policy", "disclaimer",
+            "all rights reserved", "copyright"
+        )
+        non_content_exact = ("et", "live", "more", "full story", "download", "app")  # Exact matches for short junk
 
         for element in text_containing_elements:
-            classes = element.get('class', [])
-            if 'arttextmedium' in classes or 'arttext' in classes or element.name == 'p':
-                text_chunk = element.get_text(separator=' ', strip=True)
+            text_chunk = element.get_text(separator=' ', strip=True)  # Get text and clean whitespace
 
-                if len(text_chunk) > 50 and \
-                        not text_chunk.lower().startswith("read more:") and \
-                        not text_chunk.lower().startswith("also read:") and \
-                        not text_chunk.lower().startswith("download the economic times app") and \
-                        not text_chunk.lower().startswith("by downloading the app") and \
-                        not text_chunk.lower().startswith("follow us on") and \
-                        not text_chunk.lower().startswith("join us on") and \
-                        not text_chunk.lower().startswith("view more") and \
-                        not text_chunk.lower().startswith("watch now") and \
-                        not text_chunk.lower().startswith("trending now"):
-                    full_content_parts.append(text_chunk)
+            # Basic length filter (can be adjusted)
+            if len(text_chunk) < 50:  # Too short for meaningful content
+                # Allow very short text if it looks like a headline (e.g., from an a tag, but not generic like price)
+                if len(text_chunk) > 10 and element.name in ['h1', 'h2', 'h3',
+                                                             'a']:  # Might be a sub-headline or link title
+                    pass  # Don't filter out yet, let other filters handle
+                else:
+                    continue  # Skip very short snippets
+
+            # Filter out common non-content phrases (case-insensitive)
+            text_chunk_lower = text_chunk.lower()
+            if any(text_chunk_lower.startswith(phrase) for phrase in non_content_starters) or \
+                    any(text_chunk_lower == phrase for phrase in non_content_exact) or \
+                    (len(text_chunk) < 100 and (text_chunk_lower.endswith(
+                        "ist") or "am ist" in text_chunk_lower or "pm ist" in text_chunk_lower)):  # Often timestamps/bylines
+                continue  # Skip if it matches a known non-content pattern
+
+            # Filter out known ad/widget indicators if they sneak in
+            if "ad-slot" in element.get('class', []) or "widget" in element.get('class', []) or \
+                    "sponsored" in text_chunk_lower or "advertisement" in text_chunk_lower:
+                continue
+
+            # If it passes all filters, add to list
+            full_content_parts.append(text_chunk)
 
     full_content_str = "\n".join(full_content_parts)
 
@@ -122,6 +155,9 @@ def parse_article_page(article_url):
 
 
 # --- Main ET Scraping Function ---
+# This function's content remains as provided in the last full fixed code
+# It relies on parse_article_page from this file, and get_latest_news_date_func/insert_article_func
+# passed from database_manager.py.
 def scrape_economic_times_headlines(num_articles_limit=10, get_latest_news_date_func=None, insert_article_func=None):
     """
     Scrapes headlines and article URLs from Economic Times listing pages
@@ -135,6 +171,7 @@ def scrape_economic_times_headlines(num_articles_limit=10, get_latest_news_date_
     all_articles_data = []
     seen_urls = set()
 
+    # Get the latest date for ET from DB for smart fetching
     latest_et_date_in_db = get_latest_news_date_func("Economic Times")
     if latest_et_date_in_db:
         print(
@@ -145,7 +182,6 @@ def scrape_economic_times_headlines(num_articles_limit=10, get_latest_news_date_
     urls_to_scrape = [
         'https://economictimes.indiatimes.com/news/latest-news',
         'https://economictimes.indiatimes.com/markets/stocks/news',
-        # Add more specific ET URLs here if needed
     ]
 
     for page_url in urls_to_scrape:
@@ -178,10 +214,10 @@ def scrape_economic_times_headlines(num_articles_limit=10, get_latest_news_date_
 
                 date_str = timestamp_tag['data-time']
                 formatted_date_str = None
-                article_date_obj = None  # Store as datetime for comparison
+                article_date_obj = None
 
                 try:
-                    # Use datetime.fromisoformat, assuming datetime is imported correctly here
+                    # FIX: Use datetime.fromisoformat, assuming datetime is imported correctly here
                     parsed_date_obj = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
                     formatted_date_str = parsed_date_obj.strftime('%Y-%m-%d')
                     article_date_obj = parsed_date_obj
@@ -207,7 +243,6 @@ def scrape_economic_times_headlines(num_articles_limit=10, get_latest_news_date_
                         else:
                             formatted_date_str = display_date_text
 
-                # Smart Fetching for ET: Skip if article is older than latest in DB
                 if latest_et_date_in_db and article_date_obj and article_date_obj.date() <= latest_et_date_in_db.date():
                     print(
                         f"Skipping {article_url} (older than latest in DB: {latest_et_date_in_db.strftime('%Y-%m-%d')}).")
@@ -231,7 +266,6 @@ def scrape_economic_times_headlines(num_articles_limit=10, get_latest_news_date_
                         if inserted_successfully:
                             all_articles_data.append(article_details)
                         else:
-                            # If not inserted successfully (e.g., duplicate), still count as processed for limit
                             all_articles_data.append(article_details)
 
                         seen_urls.add(article_url)
@@ -249,7 +283,7 @@ def scrape_economic_times_headlines(num_articles_limit=10, get_latest_news_date_
                         }
                         # Call the passed insert_article_func
                         insert_article_func(basic_article_data)
-                        all_articles_data.append(basic_article_data)  # Count as processed for limit
+                        all_articles_data.append(basic_article_data)
                         seen_urls.add(article_url)
 
                 if len(all_articles_data) >= num_articles_limit:
@@ -263,14 +297,11 @@ def scrape_economic_times_headlines(num_articles_limit=10, get_latest_news_date_
 
 
 # --- Test Execution Block for et_news_scraper.py ---
+# This block is here for testing this file in isolation.
+# It uses mock database functions.
 if __name__ == "__main__":
     print("--- Running Economic Times Scraper Separately for Testing ---")
-    # This requires pymongo to be imported and DB connected within this block for testing
-    import pymongo
-    from pymongo.errors import ConnectionFailure, DuplicateKeyError
 
-
-    # This will require a simplified insert function to avoid circular imports if run directly
 
     # Simple Mock DB for testing this file in isolation:
     class MockNewsCollection:
