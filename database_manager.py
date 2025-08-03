@@ -1,8 +1,7 @@
 # database_manager.py
 
 # --- All Imports at the Top ---
-import requests
-from bs4 import BeautifulSoup
+import requests  # Still needed for Finnhub/Marketaux
 import time
 import re
 # FIX: Consistent import of datetime and date classes
@@ -15,8 +14,11 @@ from dotenv import load_dotenv
 
 from nlp_processor import process_and_update_sentiment, process_and_update_entities
 
-# NEW: Import market data functions from the new file
+# NEW: Import market data functions from market_data_collector.py
 from market_data_collector import connect_to_market_data_mongodb, fetch_historical_market_data
+
+# NEW: Import ET scraping function from et_news_scraper.py
+from et_news_scraper import scrape_economic_times_headlines  # Only need to import the main function
 
 # --- Load Environment Variables ---
 load_dotenv()
@@ -30,7 +32,8 @@ FINNHUB_NEWS_BASE_URL = 'https://finnhub.io/api/v1/news'
 MARKETAUX_NEWS_BASE_URL = 'https://api.marketaux.com/v1/news/all'
 
 
-# --- Web Scraping Functions (Economic Times) ---
+# --- Helper Functions for Caching/Smart Fetching (for news APIs) ---
+# This remains in database_manager.py as it's general for news sources (ET, Finnhub, Marketaux)
 def get_latest_news_date(mongo_collection, source_name):
     """
     Retrieves the latest publication_date for a given source from MongoDB.
@@ -59,248 +62,66 @@ def get_latest_news_date(mongo_collection, source_name):
         return None
 
 
-def get_html_content(url, retries=3, delay=2):
+# --- MongoDB Insertion Function (Core DB utility) ---
+def insert_article_into_mongodb(collection, article_data):
     """
-    Fetches the HTML content of a given URL with retries and delays.
+    Inserts a single news article document into the MongoDB collection.
+    Uses update_one with upsert=True to insert if not exists, or update if exists.
     """
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-    }
-    for i in range(retries):
+    if collection is None:
+        print("MongoDB collection not available. Skipping insertion.")
+        return False
+
+    # FIX: Use dt_class.strptime for parsing dates if they come as strings
+    if 'date' in article_data and isinstance(article_data['date'], str):
         try:
-            response = requests.get(url, headers=headers, timeout=10)
-            response.raise_for_status()
-            return response.content
-        except requests.exceptions.RequestException as e:
-            print(f"Error fetching {url}: {e}")
-            if i < retries - 1:
-                print(f"Retrying in {delay} seconds...")
-                time.sleep(delay)
-            else:
-                print(f"Failed to fetch {url} after {retries} attempts.")
-                return None
-    return None
+            parsed_date = dt_class.strptime(article_data['date'], '%Y-%m-%d')
+            article_data['publication_date'] = parsed_date
+        except ValueError:
+            print(f"Warning: Could not parse date '{article_data['date']}' into datetime object. Storing as string.")
+            article_data['publication_date'] = article_data['date']
+        article_data.pop('date', None)
 
+    article_data.setdefault('sentiment_score', None)
+    article_data.setdefault('companies_mentioned', [])
+    article_data.setdefault('sectors_mentioned', [])
 
-def parse_article_page(article_url):
-    """
-    Parses a single Economic Times article page to extract title, date, and content.
-    """
-    print(f"Scraping article: {article_url}")
-    html_content = get_html_content(article_url)
-    if not html_content:
-        return None
+    try:
+        result = collection.update_one(
+            {'url': article_data['url']},
+            {
+                '$set': {
+                    'title': article_data.get('title'),
+                    'content': article_data.get('content'),
+                    'publication_date': article_data.get('publication_date'),
+                    'source': article_data.get('source'),
+                    'sentiment_score': article_data.get('sentiment_score'),
+                    'companies_mentioned': article_data.get('companies_mentioned'),
+                    'sectors_mentioned': article_data.get('sectors_mentioned')
+                }
+            },
+            upsert=True
+        )
 
-    soup = BeautifulSoup(html_content, 'lxml')
-
-    title = ""
-    date = ""
-
-    # --- Extract Title ---
-    title_element = soup.find('h1', {'class': 'artTitle'})
-    if not title_element:
-        title_element = soup.find('h1', {'class': 'article_title'})
-    if not title_element:
-        title_element = soup.find('h1')
-
-    if title_element:
-        title = title_element.get_text(strip=True)
-
-    # --- Extract Date ---
-    date_element = soup.find('time', {'class': 'publishedAt'})
-    if not date_element:
-        date_element = soup.find('div', {'class': 'publish_on'})
-    if not date_element:
-        date_element = soup.find('span', {'class': 'byline_data'})
-
-    if date_element:
-        date = date_element.get_text(strip=True)
-        match = re.search(r'\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},\s+\d{4}', date)
-        if match:
-            date = match.group(0)
+        if result.upserted_id:
+            print(f"Inserted new article: {article_data['title'][:50]}... (ID: {result.upserted_id})")
+            return True
+        elif result.matched_count > 0 and result.modified_count == 0:
+            print(f"Article already exists (URL: {article_data['url']}). No new insert or update needed.")
+            return False
+        elif result.matched_count > 0 and result.modified_count > 0:
+            print(f"Existing article (URL: {article_data['url']}) updated.")
+            return True
         else:
-            match = re.search(r'\d{1,2}\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}', date)
-            if match:
-                date = match.group(0)
+            print(f"MongoDB operation for URL {article_data['url']} neither inserted nor updated. Check logic.")
+            return False
 
-    # --- Extract Article Content (REFINED STRATEGY - Broadened Search) ---
-    full_content_parts = []
-
-    article_data_container = soup.find('div', class_=lambda x: x and 'artdata' in x.split())
-
-    if not article_data_container:
-        article_data_container = soup.find('div', id='pagecontent')
-        if article_data_container:
-            article_data_container = article_data_container.find('div', class_='pagecontent_fit')
-
-    if article_data_container:
-        text_containing_elements = article_data_container.find_all(['div', 'p'])
-
-        for element in text_containing_elements:
-            classes = element.get('class', [])
-            if 'arttextmedium' in classes or 'arttext' in classes or element.name == 'p':
-                text_chunk = element.get_text(separator=' ', strip=True)
-
-                if len(text_chunk) > 50 and \
-                        not text_chunk.lower().startswith("read more:") and \
-                        not text_chunk.lower().startswith("also read:") and \
-                        not text_chunk.lower().startswith("download the economic times app") and \
-                        not text_chunk.lower().startswith("by downloading the app") and \
-                        not text_chunk.lower().startswith("follow us on") and \
-                        not text_chunk.lower().startswith("join us on") and \
-                        not text_chunk.lower().startswith("view more") and \
-                        not text_chunk.lower().startswith("watch now") and \
-                        not text_chunk.lower().startswith("trending now"):
-                    full_content_parts.append(text_chunk)
-
-    full_content_str = "\n".join(full_content_parts)
-
-    if not title and not full_content_str:
-        print(f"Warning: Could not extract significant content from {article_url}. Title and content are empty.")
-        return None
-
-    return {
-        'title': title,
-        'date': date,
-        'content': full_content_str,
-        'url': article_url,
-        'source': 'Economic Times'
-    }
-
-
-def scrape_economic_times_headlines(num_articles_limit=10, mongo_collection=None):
-    """
-    Scrapes headlines and article URLs from Economic Times listing pages
-    and optionally inserts them into the provided MongoDB collection.
-    """
-    all_articles_data = []
-    seen_urls = set()
-
-    latest_et_date_in_db = get_latest_news_date(mongo_collection, "Economic Times")
-    if latest_et_date_in_db:
-        print(
-            f"Latest Economic Times article in DB is from: {latest_et_date_in_db.strftime('%Y-%m-%d')}. Fetching newer news.")
-    else:
-        print("No Economic Times articles found in DB. Fetching recent news.")
-
-    urls_to_scrape = [
-        'https://economictimes.indiatimes.com/news/latest-news',
-        'https://economictimes.indiatimes.com/markets/stocks/news',
-    ]
-
-    for page_url in urls_to_scrape:
-        print(f"Fetching news from listing page: {page_url}")
-        html_content = get_html_content(page_url)
-        if not html_content:
-            continue
-
-        soup = BeautifulSoup(html_content, 'lxml')
-
-        news_list_container = soup.find('ul', class_='data')
-
-        if not news_list_container:
-            print(f"Could not find news list container on {page_url}. Please re-check HTML structure.")
-            continue
-
-        news_items = news_list_container.find_all('li', itemprop='itemListElement')
-
-        if not news_items:
-            print(f"No news items found within the container on {page_url}. Please re-check LI structure.")
-            continue
-
-        for item in news_items:
-            link_tag = item.find('a', href=True)
-            timestamp_tag = item.find('span', class_='timestamp', attrs={'data-time': True})
-
-            if link_tag and timestamp_tag:
-                title = link_tag.get_text(strip=True)
-                article_url = link_tag['href']
-
-                date_str = timestamp_tag['data-time']
-                formatted_date_str = None
-                article_date_obj = None
-
-                try:
-                    # FIX: Use dt_class.fromisoformat
-                    parsed_date_obj = dt_class.fromisoformat(date_str.replace('Z', '+00:00'))
-                    formatted_date_str = parsed_date_obj.strftime('%Y-%m-%d')
-                    article_date_obj = parsed_date_obj
-                except ValueError:
-                    display_date_text = timestamp_tag.get_text(strip=True)
-                    match = re.search(r'\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},\s+\d{4}',
-                                      display_date_text)
-                    if match:
-                        formatted_date_str = match.group(0)
-                        try:
-                            # FIX: Use dt_class.strptime
-                            article_date_obj = dt_class.strptime(formatted_date_str, '%b %d, %Y')
-                        except ValueError:
-                            pass
-                    else:
-                        match = re.search(r'\d{1,2}\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}',
-                                          display_date_text)
-                        if match:
-                            formatted_date_str = match.group(0)
-                            try:
-                                # FIX: Use dt_class.strptime
-                                article_date_obj = dt_class.strptime(formatted_date_str, '%d %b %Y')
-                            except ValueError:
-                                pass
-                        else:
-                            formatted_date_str = display_date_text
-
-                if latest_et_date_in_db and article_date_obj and article_date_obj.date() <= latest_et_date_in_db.date():
-                    print(
-                        f"Skipping {article_url} (older than latest in DB: {latest_et_date_in_db.strftime('%Y-%m-%d')}).")
-                    continue
-
-                if not article_url.startswith('http'):
-                    article_url = f"https://economictimes.indiatimes.com{article_url}"
-
-                if "/articleshow/" in article_url and "economictimes.indiatimes.com" in article_url and article_url not in seen_urls:
-                    print(f"Attempting to process article: {article_url}")
-
-                    article_details = parse_article_page(article_url)
-
-                    if article_details:
-                        article_details['title'] = title
-                        article_details['date'] = formatted_date_str
-                        article_details['source'] = "Economic Times"
-
-                        if mongo_collection is not None:
-                            inserted_successfully = insert_article_into_mongodb(mongo_collection, article_details)
-                            if inserted_successfully:
-                                all_articles_data.append(article_details)
-                        else:
-                            all_articles_data.append(article_details)
-
-                        seen_urls.add(article_url)
-                        time.sleep(1.5)
-                    else:
-                        basic_article_data = {
-                            'title': title,
-                            'date': formatted_date_str,
-                            'content': 'Failed to scrape full content from article page',
-                            'url': article_url,
-                            'source': 'Economic Times',
-                            'sentiment_score': None,
-                            'companies_mentioned': [],
-                            'sectors_mentioned': []
-                        }
-                        if mongo_collection is not None:
-                            insert_article_into_mongodb(mongo_collection, basic_article_data)
-
-                        all_articles_data.append(basic_article_data)
-                        seen_urls.add(article_url)
-
-                if len(all_articles_data) >= num_articles_limit:
-                    print(f"Reached article limit ({num_articles_limit}) for testing, stopping.")
-                    break
-
-        if len(all_articles_data) >= num_articles_limit:
-            break
-
-    return all_articles_data
+    except DuplicateKeyError:
+        print(f"Duplicate key error for URL: {article_data['url']}. Article already exists.")
+        return False
+    except Exception as e:
+        print(f"Error inserting/updating article {article_data.get('url', 'N/A')}: {e}")
+        return False
 
 
 # --- News API Fetching Functions ---
@@ -541,13 +362,13 @@ def connect_to_mongodb(host='localhost', port=27017, db_name='indian_market_scan
 def insert_article_into_mongodb(collection, article_data):
     """
     Inserts a single news article document into the MongoDB collection.
-    Uses update_one with upsert=True to insert if not exists, or do nothing if exists (due to unique index).
+    Uses update_one with upsert=True to insert if not exists, or update if exists.
     """
     if collection is None:
         print("MongoDB collection not available. Skipping insertion.")
         return False
 
-    # FIX: Use dt_class.strptime and dt_class.now() for parsing
+    # FIX: Use dt_class.strptime for parsing
     if 'date' in article_data and isinstance(article_data['date'], str):
         try:
             parsed_date = dt_class.strptime(article_data['date'], '%Y-%m-%d')
@@ -615,7 +436,6 @@ if __name__ == "__main__":
 
     # --- MongoDB Connections ---
     mongo_news_collection = connect_to_mongodb(db_name='indian_market_scanner_db', collection_name='news_articles')
-    # Use imported connect_to_market_data_mongodb
     mongo_market_data_collection = connect_to_market_data_mongodb(db_name='indian_market_scanner_db',
                                                                   collection_name='historical_market_data')
 
@@ -679,11 +499,10 @@ if __name__ == "__main__":
         ]
 
         # Fetch data for the last 5 years from today
-        today_date = dt_class.now()  # FIX: Use dt_class.now()
+        today_date = dt_class.now()
         start_date_hist = (today_date - timedelta(days=5 * 365)).strftime('%Y-%m-%d')
         end_date_hist = today_date.strftime('%Y-%m-%d')
 
-        # Use imported fetch_historical_market_data
         total_market_data_records = fetch_historical_market_data(
             tickers=nifty_index_tickers,
             start_date_str=start_date_hist,
