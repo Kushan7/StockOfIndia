@@ -701,12 +701,13 @@ def fetch_historical_market_data(tickers, start_date_str, end_date_str, mongo_co
             inserted_count_for_ticker = 0
 
             for index, row in data.iterrows():
-                record_date = row['Date']  # This is now guaranteed to be a native datetime object
+                # FIX: Explicitly convert to a datetime.date object
+                # This ensures it's a native Python date object, not a Pandas Series or Timestamp with complexities
+                record_date = row['Date'].date()
 
                 market_record = {
                     'symbol': ticker,
-                    'date': record_date,
-                    # FIX: Use .item() to extract the scalar value from the Pandas Series
+                    'date': record_date,  # Stored as datetime.date object
                     'open': row['Open'].item(),
                     'high': row['High'].item(),
                     'low': row['Low'].item(),
@@ -715,6 +716,7 @@ def fetch_historical_market_data(tickers, start_date_str, end_date_str, mongo_co
                 }
 
                 try:
+                    # The 'date' field in the query and $set now uses the native datetime.date object
                     result = mongo_collection.update_one(
                         {'symbol': ticker, 'date': record_date},
                         {'$set': market_record},
