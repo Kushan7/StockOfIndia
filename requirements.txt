@@ -2,7 +2,6 @@ requests
 beautifulsoup4
 pymongo
 spacy
-collections
 transformers
 scipy
 numpy

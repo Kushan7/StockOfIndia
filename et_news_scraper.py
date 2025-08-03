@@ -40,16 +40,15 @@ def get_html_content(url, retries=3, delay=2):
 # ... (imports: requests, BeautifulSoup, time, re, datetime, etc. should be at the top) ...
 
 
-
-
 def parse_article_page(article_url):
     """
     Parses a single Economic Times article page to extract title, date, and content.
-    Includes enhanced filtering for common non-content fragments.
+    Includes enhanced filtering and aggregation of content from multiple potential blocks.
     """
-    print(f"Scraping article: {article_url}")
+    print(f"Scraping article content: {article_url}")  # Changed print message for clarity
     html_content = get_html_content(article_url)
     if not html_content:
+        print(f"Failed to fetch HTML for {article_url}.")  # More specific error message
         return None
 
     soup = BeautifulSoup(html_content, 'lxml')
@@ -84,66 +83,115 @@ def parse_article_page(article_url):
             if match:
                 date = match.group(0)
 
-    # --- Extract Article Content (REFINED STRATEGY - Broadened Search & Enhanced Filtering) ---
-    full_content_parts = []
+    # --- Extract Article Content (ULTIMATE REFINEMENT) ---
+    all_content_chunks = []
 
-    article_data_container = soup.find('div', class_=lambda x: x and 'artdata' in x.split())
+    # Define a list of potential main content containers, in order of preference
+    # Based on past inspections, these classes/ids have held main content.
+    content_container_selectors = [
+        {'name': 'div', 'attrs': {'class': 'arttextmedium'}},
+        {'name': 'div', 'attrs': {'class': 'arttext'}},  # Often sibling to arttextmedium
+        {'name': 'div', 'attrs': {'class': lambda x: x and 'artdata' in x.split()}},  # Broader wrapper
+        {'name': 'div', 'attrs': {'id': 'pagecontent'}},  # Highest level content div
+        {'name': 'section', 'attrs': {'itemprop': 'articleBody'}},  # Schema.org standard
+        {'name': 'div', 'attrs': {'class': 'Normal'}}  # Older/generic content div
+    ]
 
-    if not article_data_container:
-        article_data_container = soup.find('div', id='pagecontent')
-        if article_data_container:
-            article_data_container = article_data_container.find('div', class_='pagecontent_fit')
+    main_content_area = None
+    for selector in content_container_selectors:
+        main_content_area = soup.find(selector['name'], selector['attrs'])
+        if main_content_area:
+            break  # Found a container, stop searching
 
-    if article_data_container:
-        # Find all divs and p tags within this broader container that might hold content.
-        text_containing_elements = article_data_container.find_all(
-            ['div', 'p', 'span', 'strong'])  # Added span and strong
+    if not main_content_area:
+        print(f"Warning: Main content container not found for {article_url}. Content extraction may fail.")
+        # Fallback: Try to find common paragraph tags directly, if no main container is found
+        paragraphs = soup.find_all('p')
+        if paragraphs:
+            for p in paragraphs:
+                all_content_chunks.append(p.get_text(separator=' ', strip=True))
+    else:
+        # If a main content area is found, find all relevant text-containing descendants within it
+        # This is very aggressive to ensure we get all prose.
+        text_containing_elements = main_content_area.find_all(
+            ['div', 'p', 'span', 'strong', 'em', 'li', 'h1', 'h2', 'h3', 'h4'])
 
         # Compile common non-content phrases for more efficient filtering
-        # These are case-insensitive
-        non_content_starters = (
+        # These are case-insensitive and apply to entire stripped chunks.
+        non_content_filters = (
             "read more:", "also read:", "download the economic times app",
             "by downloading the app", "follow us on", "join us on",
             "view more", "watch now", "trending now",
             "et prime", "to see how", "track live", "go to the", "for full story",
             "terms of use", "privacy policy", "cookie policy", "disclaimer",
-            "all rights reserved", "copyright"
+            "all rights reserved", "copyright", "subscribe", "newsletter", "sign in",
+            "log in", "photo gallery", "in pics", "videos", "podcast", "topics", "agencies",
+            "pti", "ani", "ap", "reuters", "bloomberg",  # Common news agency attributions often stand alone
+            "live blog", "highlights", "key takeaways", "stock market",  # Generic phrases that might be section titles
+            "share via", "facebook", "twitter", "linkedin", "whatsapp", "email",  # Sharing buttons
+            "get latest news on", "on the go", "flash news", "breaking news",  # App/website promo
+            "must read", "related news", "related stories", "more from", "top news"  # Related content sections
         )
-        non_content_exact = ("et", "live", "more", "full story", "download", "app")  # Exact matches for short junk
+        # Regex for patterns that often indicate non-content lines
+        # e.g., "Updated: Aug 1, 2025, 08:45 AM IST"
+        # or simple numeric/short codes "123456789"
+        # or social media share counts "2.5K shares"
+        regex_filters = [
+            r"^\d{1,2}:\d{2} (am|pm) ist$",  # Time stamps like "08:45 AM IST"
+            r"^\w{3,4} \d{1,2}, \d{4}, \d{1,2}:\d{2} (am|pm) ist$",
+            # Full byline/date-time like "Aug 1, 2025, 08:45 AM IST"
+            r"^\s*\d{1,3}k\s+shares\s*$",  # "100k shares"
+            r"^\s*-\s*[A-Za-z\s]+\s*-\s*$",  # "- New Delhi -"
+            r"^\s*\(pti\)\s*$",  # "(PTI)"
+            r"^\d{1,}\s+comments?$",  # "5 comments"
+            r"^\s*follow us on telegram",  # common footer line
+            r"read more news on", "read more business news"  # More footer
+        ]
+        compiled_regexes = [re.compile(pattern, re.IGNORECASE) for pattern in regex_filters]
 
         for element in text_containing_elements:
-            text_chunk = element.get_text(separator=' ', strip=True)  # Get text and clean whitespace
+            text_chunk = element.get_text(separator=' ', strip=True)
 
-            # Basic length filter (can be adjusted)
-            if len(text_chunk) < 50:  # Too short for meaningful content
-                # Allow very short text if it looks like a headline (e.g., from an a tag, but not generic like price)
-                if len(text_chunk) > 10 and element.name in ['h1', 'h2', 'h3',
-                                                             'a']:  # Might be a sub-headline or link title
-                    pass  # Don't filter out yet, let other filters handle
-                else:
-                    continue  # Skip very short snippets
-
-            # Filter out common non-content phrases (case-insensitive)
-            text_chunk_lower = text_chunk.lower()
-            if any(text_chunk_lower.startswith(phrase) for phrase in non_content_starters) or \
-                    any(text_chunk_lower == phrase for phrase in non_content_exact) or \
-                    (len(text_chunk) < 100 and (text_chunk_lower.endswith(
-                        "ist") or "am ist" in text_chunk_lower or "pm ist" in text_chunk_lower)):  # Often timestamps/bylines
-                continue  # Skip if it matches a known non-content pattern
-
-            # Filter out known ad/widget indicators if they sneak in
-            if "ad-slot" in element.get('class', []) or "widget" in element.get('class', []) or \
-                    "sponsored" in text_chunk_lower or "advertisement" in text_chunk_lower:
+            if not text_chunk:  # Skip empty chunks
                 continue
 
-            # If it passes all filters, add to list
-            full_content_parts.append(text_chunk)
+            # Skip if very short and not a significant header/link
+            if len(text_chunk) < 20:  # Lowered threshold again for fragments
+                # Allow very short text if it's potentially a sub-headline (h1-h4) or a direct link title
+                if element.name not in ['h1', 'h2', 'h3', 'h4', 'a', 'strong', 'em']:
+                    continue  # Skip very short snippets that are not structural
 
-    full_content_str = "\n".join(full_content_parts)
+            text_chunk_lower = text_chunk.lower()
 
-    if not title and not full_content_str:
-        print(f"Warning: Could not extract significant content from {article_url}. Title and content are empty.")
-        return None
+            # Filter by start/end/exact matches
+            if any(text_chunk_lower.startswith(phrase) for phrase in non_content_filters) or \
+                    any(text_chunk_lower.endswith(phrase) for phrase in non_content_filters) or \
+                    any(text_chunk_lower == phrase for phrase in non_content_filters):
+                continue
+
+            # Filter by regex patterns
+            if any(regex.search(text_chunk_lower) for regex in compiled_regexes):
+                continue
+
+            # Filter out known ad/widget indicators if they sneak in via classes or attributes
+            if element.get('class') and any(
+                    indicator in class_name.lower() for class_name in element.get('class', []) for indicator in
+                    ["ad", "widget", "sponsored", "promo"]):
+                continue
+            if element.get('id') and any(
+                    indicator in element.get('id').lower() for indicator in ["ad", "widget", "promo"]):
+                continue
+
+            # Finally, if it passes all filters, add to content
+            all_content_chunks.append(text_chunk)
+
+    full_content_str = "\n".join(all_content_chunks)
+
+    # Final check for minimal content after all filtering
+    if not title or len(full_content_str) < 50:  # Require at least 50 chars of content
+        print(
+            f"Warning: Significant content (>=50 chars) not extracted for {article_url}. Title: '{title[:50]}...' Content len: {len(full_content_str)}")
+        return None  # Return None if content is too short after filtering
 
     return {
         'title': title,
@@ -154,10 +202,7 @@ def parse_article_page(article_url):
     }
 
 
-# --- Main ET Scraping Function ---
-# This function's content remains as provided in the last full fixed code
-# It relies on parse_article_page from this file, and get_latest_news_date_func/insert_article_func
-# passed from database_manager.py.
+# ... (scrape_economic_times_headlines function as it was, unchanged from previous version) ...
 def scrape_economic_times_headlines(num_articles_limit=10, get_latest_news_date_func=None, insert_article_func=None):
     """
     Scrapes headlines and article URLs from Economic Times listing pages
@@ -294,16 +339,13 @@ def scrape_economic_times_headlines(num_articles_limit=10, get_latest_news_date_
             break
 
     return all_articles_data
-
-
 # --- Test Execution Block for et_news_scraper.py ---
-# This block is here for testing this file in isolation.
-# It uses mock database functions.
-# --- Test Execution Block for et_news_scraper.py (FIXED MOCK) ---
-# This block is here for testing this file in isolation.
-# It uses mock database functions.
+# This remains the same, as it imports the functions above.
 if __name__ == "__main__":
     print("--- Running Economic Times Scraper Separately for Testing ---")
+
+    import pymongo  # Needed for mock DB testing
+    from pymongo.errors import ConnectionFailure, DuplicateKeyError
 
 
     # Simple Mock DB for testing this file in isolation:
@@ -328,21 +370,13 @@ if __name__ == "__main__":
                 return type('obj', (object,), {'matched_count': 0, 'modified_count': 0, 'upserted_id': 'mock_id'})()
             return type('obj', (object,), {'matched_count': 0, 'modified_count': 0, 'upserted_id': None})()
 
-        # FIX: Corrected Mock for find method to behave like an iterator (generator)
         def find(self, query=None):
-            # This method acts as a mock cursor. It needs to support .sort() and .limit() and be iterable.
-            # For get_latest_news_date, it sorts by date DESC and limits to 1.
-            # This simplified mock assumes the query is only for source and latest date.
-
+            # This mock for find() should now return a generator directly
             filtered_data = [d for d in self.data.values() if
                              d.get('source') == "Economic Times" and isinstance(d.get('publication_date'), datetime)]
-
             if filtered_data:
-                # Sort by publication_date descending to find the latest
                 latest_article = max(filtered_data, key=lambda x: x.get('publication_date', datetime.min))
-                # Return a generator that yields the latest article once
                 yield latest_article
-            # If no data or no matching data, the generator will simply yield nothing (empty)
 
 
     mock_db_collection = MockNewsCollection()
@@ -350,7 +384,6 @@ if __name__ == "__main__":
 
     # Mock versions of the functions scrape_economic_times_headlines needs
     def mock_get_latest_news_date_func(source_name):
-        # The .find() method now returns a proper generator, so next() works
         latest_article_cursor = mock_db_collection.find(
             {"source": source_name, "publication_date": {"$ne": None}}
         )
@@ -363,8 +396,6 @@ if __name__ == "__main__":
 
 
     def mock_insert_article_func(article_data):
-        # We need pymongo.ASCENDING for create_index in the main file's connect_to_mongodb
-        # But this mock db doesn't use it, so just accept the argument (or remove it if not needed in mock)
         return mock_db_collection.update_one({'url': article_data['url']}, {'$set': article_data}, upsert=True)
 
 
