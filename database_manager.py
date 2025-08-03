@@ -5,15 +5,14 @@ import requests
 from bs4 import BeautifulSoup
 import time
 import re
-from datetime import datetime, timedelta  # timedelta is still needed here for news date range
+# FIX: Consistent import of datetime and date classes
+from datetime import datetime as dt_class, date as date_class, timedelta
 import pymongo
 from pymongo.errors import ConnectionFailure, DuplicateKeyError
 
-# For loading API keys from .env file
 import os
 from dotenv import load_dotenv
 
-# Import NLP processing functions from the new file
 from nlp_processor import process_and_update_sentiment, process_and_update_entities
 
 # NEW: Import market data functions from the new file
@@ -32,7 +31,6 @@ MARKETAUX_NEWS_BASE_URL = 'https://api.marketaux.com/v1/news/all'
 
 
 # --- Web Scraping Functions (Economic Times) ---
-# get_latest_news_date is needed by scrape_economic_times_headlines, fetch_news_from_finnhub, fetch_news_from_marketaux
 def get_latest_news_date(mongo_collection, source_name):
     """
     Retrieves the latest publication_date for a given source from MongoDB.
@@ -47,11 +45,13 @@ def get_latest_news_date(mongo_collection, source_name):
 
     try:
         latest = latest_article.next()
-        if isinstance(latest.get('publication_date'), datetime):
+        # FIX: Use dt_class explicitly
+        if isinstance(latest.get('publication_date'), dt_class):
             return latest['publication_date']
         elif isinstance(latest.get('publication_date'), str):
             try:
-                return datetime.strptime(latest['publication_date'], '%Y-%m-%d')
+                # FIX: Use dt_class.strptime
+                return dt_class.strptime(latest['publication_date'], '%Y-%m-%d')
             except ValueError:
                 return None
         return None
@@ -221,7 +221,8 @@ def scrape_economic_times_headlines(num_articles_limit=10, mongo_collection=None
                 article_date_obj = None
 
                 try:
-                    parsed_date_obj = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+                    # FIX: Use dt_class.fromisoformat
+                    parsed_date_obj = dt_class.fromisoformat(date_str.replace('Z', '+00:00'))
                     formatted_date_str = parsed_date_obj.strftime('%Y-%m-%d')
                     article_date_obj = parsed_date_obj
                 except ValueError:
@@ -231,7 +232,8 @@ def scrape_economic_times_headlines(num_articles_limit=10, mongo_collection=None
                     if match:
                         formatted_date_str = match.group(0)
                         try:
-                            article_date_obj = datetime.strptime(formatted_date_str, '%b %d, %Y')
+                            # FIX: Use dt_class.strptime
+                            article_date_obj = dt_class.strptime(formatted_date_str, '%b %d, %Y')
                         except ValueError:
                             pass
                     else:
@@ -240,7 +242,8 @@ def scrape_economic_times_headlines(num_articles_limit=10, mongo_collection=None
                         if match:
                             formatted_date_str = match.group(0)
                             try:
-                                article_date_obj = datetime.strptime(formatted_date_str, '%d %b %Y')
+                                # FIX: Use dt_class.strptime
+                                article_date_obj = dt_class.strptime(formatted_date_str, '%d %b %Y')
                             except ValueError:
                                 pass
                         else:
@@ -312,9 +315,10 @@ def fetch_news_from_finnhub(api_key, mongo_collection, num_articles_limit=15):
         return []
 
     latest_finnhub_date_in_db = get_latest_news_date(mongo_collection, "Finnhub")
+    # FIX: Use dt_class.strftime and dt_class.now()
     from_date_str = (latest_finnhub_date_in_db + timedelta(days=1)).strftime(
         '%Y-%m-%d') if latest_finnhub_date_in_db else None
-    to_date_str = datetime.now().strftime('%Y-%m-%d')
+    to_date_str = dt_class.now().strftime('%Y-%m-%d')
 
     if latest_finnhub_date_in_db:
         print(
@@ -322,7 +326,8 @@ def fetch_news_from_finnhub(api_key, mongo_collection, num_articles_limit=15):
     else:
         print("No Finnhub articles found in DB. Fetching recent news.")
 
-    if from_date_str and datetime.strptime(from_date_str, '%Y-%m-%d').date() > datetime.now().date():
+    # FIX: Use dt_class.strptime and dt_class.now()
+    if from_date_str and dt_class.strptime(from_date_str, '%Y-%m-%d').date() > dt_class.now().date():
         print(f"Skipping Finnhub fetch: From date {from_date_str} is in the future.")
         return []
 
@@ -337,7 +342,8 @@ def fetch_news_from_finnhub(api_key, mongo_collection, num_articles_limit=15):
         params = {
             'category': category,
             'token': api_key,
-            'from': from_date_str if from_date_str else (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d'),
+            # FIX: Use dt_class.now()
+            'from': from_date_str if from_date_str else (dt_class.now() - timedelta(days=7)).strftime('%Y-%m-%d'),
             'to': to_date_str
         }
 
@@ -367,7 +373,8 @@ def fetch_news_from_finnhub(api_key, mongo_collection, num_articles_limit=15):
                     'title': item.get('headline'),
                     'content': item.get('summary'),
                     'url': item.get('url'),
-                    'publication_date': datetime.fromtimestamp(item.get('datetime', 0)).strftime('%Y-%m-%d'),
+                    # FIX: Use dt_class.fromtimestamp
+                    'publication_date': dt_class.fromtimestamp(item.get('datetime', 0)).strftime('%Y-%m-%d'),
                     'source': "Finnhub",
                     'sentiment_score': None,
                     'companies_mentioned': [],
@@ -413,8 +420,8 @@ def fetch_news_from_marketaux(api_key, mongo_collection, num_articles_limit=15):
         print("MongoDB collection not available for Marketaux news. Aborting.")
         return []
 
-    # This relies on get_latest_news_date which is defined in this file.
     latest_marketaux_date_in_db = get_latest_news_date(mongo_collection, "Marketaux")
+    # FIX: Use dt_class and timedelta.isoformat()
     published_after_date_str = (
             latest_marketaux_date_in_db + timedelta(days=1)).isoformat() if latest_marketaux_date_in_db else None
 
@@ -424,8 +431,9 @@ def fetch_news_from_marketaux(api_key, mongo_collection, num_articles_limit=15):
     else:
         print("No Marketaux articles found in DB. Fetching recent news.")
 
-    if published_after_date_str and datetime.fromisoformat(
-            published_after_date_str.replace('Z', '+00:00')).date() > datetime.now().date():
+    # FIX: Use dt_class.fromisoformat and dt_class.now()
+    if published_after_date_str and dt_class.fromisoformat(
+            published_after_date_str.replace('Z', '+00:00')).date() > dt_class.now().date():
         print(f"Skipping Marketaux fetch: Published after date {published_after_date_str} is in the future.")
         return []
 
@@ -441,7 +449,8 @@ def fetch_news_from_marketaux(api_key, mongo_collection, num_articles_limit=15):
     }
 
     if not published_after_date_str:
-        params['published_after'] = (datetime.now() - timedelta(days=7)).isoformat()
+        # FIX: Use dt_class.now()
+        params['published_after'] = (dt_class.now() - timedelta(days=7)).isoformat()
 
     response = None
     try:
@@ -460,7 +469,8 @@ def fetch_news_from_marketaux(api_key, mongo_collection, num_articles_limit=15):
             published_date_str = None
             if item.get('published_at'):
                 try:
-                    dt_object = datetime.fromisoformat(item['published_at'].replace('Z', '+00:00'))
+                    # FIX: Use dt_class.fromisoformat
+                    dt_object = dt_class.fromisoformat(item['published_at'].replace('Z', '+00:00'))
                     published_date_str = dt_object.strftime('%Y-%m-%d')
                 except ValueError:
                     print(f"Warning: Could not parse Marketaux date '{item['published_at']}'. Storing as raw string.")
@@ -537,9 +547,10 @@ def insert_article_into_mongodb(collection, article_data):
         print("MongoDB collection not available. Skipping insertion.")
         return False
 
+    # FIX: Use dt_class.strptime and dt_class.now() for parsing
     if 'date' in article_data and isinstance(article_data['date'], str):
         try:
-            parsed_date = datetime.strptime(article_data['date'], '%Y-%m-%d')
+            parsed_date = dt_class.strptime(article_data['date'], '%Y-%m-%d')
             article_data['publication_date'] = parsed_date
         except ValueError:
             print(f"Warning: Could not parse date '{article_data['date']}' into datetime object. Storing as string.")
@@ -604,6 +615,7 @@ if __name__ == "__main__":
 
     # --- MongoDB Connections ---
     mongo_news_collection = connect_to_mongodb(db_name='indian_market_scanner_db', collection_name='news_articles')
+    # Use imported connect_to_market_data_mongodb
     mongo_market_data_collection = connect_to_market_data_mongodb(db_name='indian_market_scanner_db',
                                                                   collection_name='historical_market_data')
 
@@ -667,7 +679,7 @@ if __name__ == "__main__":
         ]
 
         # Fetch data for the last 5 years from today
-        today_date = datetime.now()
+        today_date = dt_class.now()  # FIX: Use dt_class.now()
         start_date_hist = (today_date - timedelta(days=5 * 365)).strftime('%Y-%m-%d')
         end_date_hist = today_date.strftime('%Y-%m-%d')
 

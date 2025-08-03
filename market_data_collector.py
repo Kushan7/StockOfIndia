@@ -2,11 +2,13 @@
 
 import yfinance as yf
 import pandas as pd  # pandas is crucial for DataFrame operations
-from datetime import datetime, timedelta
+# FIX: Explicitly import datetime class as dt_class, date class as date_class, and timedelta
+from datetime import datetime as dt_class, date as date_class, timedelta
 import pymongo
 from pymongo.errors import ConnectionFailure, DuplicateKeyError
 import time  # For time.sleep
-import requests
+import requests  # requests might be indirectly used by yfinance, good to have it
+
 
 # --- MongoDB Connection for Market Data ---
 def connect_to_market_data_mongodb(host='localhost', port=27017, db_name='indian_market_scanner_db',
@@ -49,7 +51,8 @@ def get_latest_market_data_date(mongo_collection, symbol):
 
     try:
         latest = latest_record.next()
-        if isinstance(latest.get('date'), datetime):
+        # Use dt_class for datetime.datetime type check
+        if isinstance(latest.get('date'), dt_class):
             return latest['date']
         return None
     except StopIteration:
@@ -74,19 +77,17 @@ def fetch_historical_market_data(tickers, start_date_str, end_date_str, mongo_co
         latest_date_in_db = get_latest_market_data_date(mongo_collection, ticker)
 
         # Ensure latest_date_in_db is a datetime object before using timedelta/strftime
-        if latest_date_in_db and isinstance(latest_date_in_db, datetime):
-            # Fetch from one day after the latest date in DB
+        if latest_date_in_db and isinstance(latest_date_in_db, dt_class):  # Use dt_class for isinstance
             fetch_start_date_obj = latest_date_in_db + timedelta(days=1)
             fetch_start_date_str = fetch_start_date_obj.strftime('%Y-%m-%d')
             print(
                 f"Latest data for {ticker} in DB is {latest_date_in_db.strftime('%Y-%m-%d')}. Fetching from {fetch_start_date_str}...")
         else:
-            # If no data in DB, fetch from the provided start_date_str
             fetch_start_date_str = start_date_str
             print(f"No data for {ticker} in DB. Fetching from {fetch_start_date_str}...")
 
-        # Ensure fetch_start_date_str is not in the future
-        if datetime.strptime(fetch_start_date_str, '%Y-%m-%d').date() > datetime.now().date():
+        # Use dt_class for datetime.strptime and dt_class.now()
+        if dt_class.strptime(fetch_start_date_str, '%Y-%m-%d').date() > dt_class.now().date():
             print(f"Skipping {ticker}: Fetch start date {fetch_start_date_str} is in the future.")
             continue
 
@@ -99,31 +100,57 @@ def fetch_historical_market_data(tickers, start_date_str, end_date_str, mongo_co
                     f"No new data found for {ticker} in the specified date range ({fetch_start_date_str} to {end_date_str}).")
                 continue
 
-            # --- ULTIMATE FIX FOR PANDAS DATAFRAME TO DICT CONVERSION ---
-            # Step 1: Convert original index (Date) to a column named 'Date'
-            # This is robust regardless of whether the index was named or not.
             data.reset_index(inplace=True)
 
-            # Step 2: Ensure the 'Date' column is converted to native Python datetime.date objects.
-            # This is done robustly via pd.to_datetime and .dt.date
-            # The .dt.date accessor explicitly gets the date object from a pandas Timestamp.
-            data['Date'] = pd.to_datetime(data['Date']).dt.date
+            # Flatten the MultiIndex columns if they exist.
+            new_columns = []
+            for col in data.columns:
+                if isinstance(col, tuple):
+                    new_columns.append(col[0])  # Take the first element of the tuple, e.g., 'Date', 'Close'
+                else:
+                    new_columns.append(col)  # For regular column names
 
-            # Step 3: Convert the DataFrame to a list of dictionaries.
-            # This is where all values become scalar, native Python types.
-            # It completely bypasses issues with 'Series' objects from .iterrows().
+            data.columns = new_columns
+
+            # Convert the 'Date' column to native Python datetime.date objects.
+            # This is robust via pd.to_datetime and .dt.date
+            if 'Date' in data.columns:
+                data['Date'] = pd.to_datetime(data['Date']).dt.date
+            else:
+                raise ValueError("Expected 'Date' column not found after flattening and preprocessing.")
+
+            # Ensure other expected columns are present and correctly named (strings)
+            expected_price_volume_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+            for col in expected_price_volume_cols:
+                if col not in data.columns:
+                    raise ValueError(
+                        f"Missing expected column '{col}' in yfinance data for {ticker} after preprocessing.")
+
+            # Convert the DataFrame to a list of dictionaries.
             records_to_insert = data.to_dict('records')
-            # --- END ULTIMATE FIX ---
+
+            # --- DEBUG STEP 1: Verify columns and data types AFTER all preprocessing ---
+            if records_to_insert:  # Only print if there's data to show
+                print(f"DEBUG (Market Data): Columns after all preprocessing: {data.columns.tolist()}")
+                print(f"DEBUG (Market Data): First 3 rows of data:\n{data.head(3)}")
+                print(
+                    f"DEBUG (Market Data): Dtypes of processed columns:\n{data[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']].dtypes}")
+                print(f"DEBUG (Market Data): First record keys: {records_to_insert[0].keys()}")
+                print(f"DEBUG (Market Data): First record: {records_to_insert[0]}")
+            # --- END DEBUG ---
 
             inserted_count_for_ticker = 0
 
             for record in records_to_insert:  # Iterate through the list of dictionaries
-                # All values in 'record' are now direct Python scalars (datetime.date, float, int)
-                record_date = record['Date']  # This is now guaranteed to be a native datetime.date object
+                record_date_dt_date = record['Date']  # This is a datetime.date object
+
+                # --- FIX: Convert datetime.date object to datetime.datetime (midnight) for MongoDB ---
+                record_date_for_mongo = dt_class.combine(record_date_dt_date, dt_class.min.time())
+                # --- END FIX ---
 
                 market_record = {
                     'symbol': ticker,
-                    'date': record_date,  # Stored as datetime.date object
+                    'date': record_date_for_mongo,  # Use the datetime.datetime object for MongoDB
                     'open': record['Open'],
                     'high': record['High'],
                     'low': record['Low'],
@@ -133,7 +160,7 @@ def fetch_historical_market_data(tickers, start_date_str, end_date_str, mongo_co
 
                 try:
                     result = mongo_collection.update_one(
-                        {'symbol': ticker, 'date': record_date},
+                        {'symbol': ticker, 'date': record_date_for_mongo},  # Use for query too
                         {'$set': market_record},
                         upsert=True
                     )
@@ -141,27 +168,26 @@ def fetch_historical_market_data(tickers, start_date_str, end_date_str, mongo_co
                     if result.upserted_id:
                         inserted_count_for_ticker += 1
                         total_inserted_count += 1
-                    # No explicit print for existing/modified for brevity here
 
                 except DuplicateKeyError:
-                    # The record_date is now reliably a datetime.date object here too.
-                    date_for_print = record_date.strftime('%Y-%m-%d')
+                    date_for_print = record_date_dt_date.strftime(
+                        '%Y-%m-%d')  # Print original datetime.date for message
                     print(f"  Duplicate record for {ticker} on {date_for_print}. Skipped by unique index.")
                 except Exception as e:
-                    # The record_date is now reliably a datetime.date object here too.
-                    date_for_print = record_date.strftime('%Y-%m-%d')
-                    print(f"  Error inserting/updating {ticker} on {date_for_print}: {e}")
+                    date_for_print = record_date_dt_date.strftime(
+                        '%Y-%m-%d')  # Print original datetime.date for message
+                    # FIX: Use dt_class and date_class explicitly here in isinstance
+                    print(f"  Error inserting/updating {ticker} on {date_for_print}: {type(e).__name__}: {e}")
 
             print(f"Successfully processed {inserted_count_for_ticker} new/updated records for {ticker}.")
-            time.sleep(1)  # Be polite to Yahoo Finance API
+            time.sleep(1)
 
         except Exception as e:
-            # More descriptive error handling for fetching/processing
             if isinstance(e, requests.exceptions.ConnectionError) or \
                     (hasattr(e, 'args') and isinstance(e.args[0], ConnectionResetError)):
                 print(f"Failed to fetch data for {ticker} due to a network connection error: {e}")
             else:
-                print(f"Failed to fetch or process data for {ticker}: {e}")
+                print(f"Failed to fetch or process data for {ticker}: {type(e).__name__}: {e}")
 
     print(f"\nHistorical market data collection complete. Total new/updated records: {total_inserted_count}.")
     return total_inserted_count
@@ -188,8 +214,7 @@ if __name__ == "__main__":
             # Add more as needed
         ]
 
-        # Fetch data for the last 5 years from today (as a base, will update incrementally)
-        today_date = datetime.now()  # Use a distinct variable name
+        today_date = dt_class.now()  # FIX: Use dt_class.now()
         start_date_hist = (today_date - timedelta(days=5 * 365)).strftime('%Y-%m-%d')
         end_date_hist = today_date.strftime('%Y-%m-%d')
 
@@ -200,7 +225,7 @@ if __name__ == "__main__":
             mongo_collection=mongo_market_data_collection
         )
         if total_market_data_records > 0:
-            print(f"\nSuccessfully collected {total_market_data_records} new/updated market data records.")
+            print(f"\nSuccessfully collected {total_market_data_records} new/updated records.")
         else:
             print("\nNo new market data records collected or an error occurred during market data collection.")
 
