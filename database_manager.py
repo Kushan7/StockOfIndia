@@ -534,6 +534,8 @@ def fetch_historical_market_data(tickers, start_date, end_date, mongo_collection
 
     total_inserted_count = 0
 
+
+
     for ticker in tickers:
         print(f"Fetching data for {ticker} from {start_date} to {end_date}...")
         try:
@@ -550,19 +552,34 @@ def fetch_historical_market_data(tickers, start_date, end_date, mongo_collection
 
             inserted_count_for_ticker = 0
 
+            # Fix in database_manager.py, inside fetch_historical_market_data function
+
+            # ... (code before the loop) ...
+
             for index, row in data.iterrows():
-                # Convert date to datetime object for better MongoDB querying
-                record_date = row['Date'].to_pydatetime()
+                # Fix: Directly assign or ensure it's a datetime object.
+                # Pandas Timestamp objects are typically compatible with datetime.datetime.
+                # If 'Date' is already a datetime.datetime object, no conversion is needed.
+                # If it's a pandas.Timestamp, it behaves like datetime.datetime.
+                record_date = row['Date']  # Assign directly. Pandas Timestamps are usually fine.
+
+                # Alternatively, ensure explicit conversion if the above fails (though less likely)
+                # if isinstance(row['Date'], pd.Timestamp):
+                #     record_date = row['Date'].to_pydatetime()
+                # else:
+                #     record_date = row['Date'] # Assume it's already datetime or compatible
 
                 market_record = {
                     'symbol': ticker,
-                    'date': record_date,
+                    'date': record_date,  # Stored as datetime object
                     'open': row['Open'],
                     'high': row['High'],
                     'low': row['Low'],
                     'close': row['Close'],
                     'volume': row['Volume']
                 }
+
+                # ... (rest of the loop and function) ...
 
                 try:
                     # Use update_one with upsert=True to insert new or update existing records
