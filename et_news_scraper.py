@@ -299,6 +299,9 @@ def scrape_economic_times_headlines(num_articles_limit=10, get_latest_news_date_
 # --- Test Execution Block for et_news_scraper.py ---
 # This block is here for testing this file in isolation.
 # It uses mock database functions.
+# --- Test Execution Block for et_news_scraper.py (FIXED MOCK) ---
+# This block is here for testing this file in isolation.
+# It uses mock database functions.
 if __name__ == "__main__":
     print("--- Running Economic Times Scraper Separately for Testing ---")
 
@@ -325,19 +328,21 @@ if __name__ == "__main__":
                 return type('obj', (object,), {'matched_count': 0, 'modified_count': 0, 'upserted_id': 'mock_id'})()
             return type('obj', (object,), {'matched_count': 0, 'modified_count': 0, 'upserted_id': None})()
 
+        # FIX: Corrected Mock for find method to behave like an iterator (generator)
         def find(self, query=None):
-            # Simplified mock for get_latest_news_date
-            if query and query.get("source") == "Economic Times":
-                if self.data:
-                    # Find latest from mock data (not robust for real world)
-                    latest = max((d for d in self.data.values() if
-                                  d.get('source') == "Economic Times" and isinstance(d.get('publication_date'),
-                                                                                     datetime)),
-                                 key=lambda x: x.get('publication_date', datetime.min), default=None)
-                    if latest:
-                        # Return an iterator-like object
-                        return type('obj', (object,), {'next': lambda: latest})()
-            return type('obj', (object,), {'next': lambda: (_ for _ in ()).throw(StopIteration)})()  # Empty iterator
+            # This method acts as a mock cursor. It needs to support .sort() and .limit() and be iterable.
+            # For get_latest_news_date, it sorts by date DESC and limits to 1.
+            # This simplified mock assumes the query is only for source and latest date.
+
+            filtered_data = [d for d in self.data.values() if
+                             d.get('source') == "Economic Times" and isinstance(d.get('publication_date'), datetime)]
+
+            if filtered_data:
+                # Sort by publication_date descending to find the latest
+                latest_article = max(filtered_data, key=lambda x: x.get('publication_date', datetime.min))
+                # Return a generator that yields the latest article once
+                yield latest_article
+            # If no data or no matching data, the generator will simply yield nothing (empty)
 
 
     mock_db_collection = MockNewsCollection()
@@ -345,18 +350,21 @@ if __name__ == "__main__":
 
     # Mock versions of the functions scrape_economic_times_headlines needs
     def mock_get_latest_news_date_func(source_name):
-        # Directly use mock_db_collection
-        latest_article = mock_db_collection.find(
+        # The .find() method now returns a proper generator, so next() works
+        latest_article_cursor = mock_db_collection.find(
             {"source": source_name, "publication_date": {"$ne": None}}
         )
         try:
-            latest = latest_article.next()
+            # next() directly retrieves the next item from the generator
+            latest = next(latest_article_cursor)
             return latest.get('publication_date')
         except StopIteration:
             return None
 
 
     def mock_insert_article_func(article_data):
+        # We need pymongo.ASCENDING for create_index in the main file's connect_to_mongodb
+        # But this mock db doesn't use it, so just accept the argument (or remove it if not needed in mock)
         return mock_db_collection.update_one({'url': article_data['url']}, {'$set': article_data}, upsert=True)
 
 
