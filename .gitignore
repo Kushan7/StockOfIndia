@@ -4,6 +4,7 @@
 *.TAG
 *.cfg
 .env
+./.env
 # Python virtual environment
 .venv/
 venv/
