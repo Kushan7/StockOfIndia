@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 import pymongo
 from pymongo.errors import ConnectionFailure, DuplicateKeyError
 import yfinance as yf
-
+import pandas as pd
 import os
 from dotenv import load_dotenv
 
@@ -690,19 +690,18 @@ def fetch_historical_market_data(tickers, start_date_str, end_date_str, mongo_co
 
             data.reset_index(inplace=True)
 
-            # --- FIX: Convert Pandas Timestamps to native Python datetimes after reset_index ---
-            data['Date'] = data['Date'].apply(lambda x: x.to_pydatetime())
-            # --- END FIX ---
-
-            # In your database_manager.py file, locate the fetch_historical_market_data function
-
-            # ... (code before the loop: data.reset_index(inplace=True), data['Date'] = ... ) ...
+            # --- REVISED FIX FOR DATE HANDLING ---
+            # Ensure the 'Date' column contains native Python datetime.datetime objects.
+            # This is robust for various yfinance/pandas outputs.
+            data['Date'] = pd.to_datetime(data['Date'])
+            # --- END REVISED FIX ---
 
             inserted_count_for_ticker = 0
 
             for index, row in data.iterrows():
-                # FIX: Explicitly convert to a datetime.date object
-                # This ensures it's a native Python date object, not a Pandas Series or Timestamp with complexities
+                # Get the date as a native Python datetime.date object.
+                # row['Date'] is a pandas Timestamp (which is like a datetime.datetime).
+                # Calling .date() on it directly gets the datetime.date object.
                 record_date = row['Date'].date()
 
                 market_record = {
@@ -716,7 +715,6 @@ def fetch_historical_market_data(tickers, start_date_str, end_date_str, mongo_co
                 }
 
                 try:
-                    # The 'date' field in the query and $set now uses the native datetime.date object
                     result = mongo_collection.update_one(
                         {'symbol': ticker, 'date': record_date},
                         {'$set': market_record},
@@ -729,12 +727,10 @@ def fetch_historical_market_data(tickers, start_date_str, end_date_str, mongo_co
                     # No explicit print for existing/modified for brevity here
 
                 except DuplicateKeyError:
-                    date_for_print = record_date.strftime('%Y-%m-%d') if isinstance(record_date, datetime) else str(
-                        record_date)
+                    date_for_print = record_date.strftime('%Y-%m-%d')  # This should now work reliably
                     print(f"  Duplicate record for {ticker} on {date_for_print}. Skipped by unique index.")
                 except Exception as e:
-                    date_for_print = record_date.strftime('%Y-%m-%d') if isinstance(record_date, datetime) else str(
-                        record_date)
+                    date_for_print = record_date.strftime('%Y-%m-%d')  # This should now work reliably
                     print(f"  Error inserting/updating {ticker} on {date_for_print}: {e}")
 
             print(f"Successfully processed {inserted_count_for_ticker} new/updated records for {ticker}.")
