@@ -5,15 +5,19 @@ import requests
 from bs4 import BeautifulSoup
 import time
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta  # timedelta is still needed here for news date range
 import pymongo
 from pymongo.errors import ConnectionFailure, DuplicateKeyError
-import yfinance as yf
-import pandas as pd
+
+# For loading API keys from .env file
 import os
 from dotenv import load_dotenv
 
+# Import NLP processing functions from the new file
 from nlp_processor import process_and_update_sentiment, process_and_update_entities
+
+# NEW: Import market data functions from the new file
+from market_data_collector import connect_to_market_data_mongodb, fetch_historical_market_data
 
 # --- Load Environment Variables ---
 load_dotenv()
@@ -27,8 +31,8 @@ FINNHUB_NEWS_BASE_URL = 'https://finnhub.io/api/v1/news'
 MARKETAUX_NEWS_BASE_URL = 'https://api.marketaux.com/v1/news/all'
 
 
-# --- Helper Functions for Caching/Smart Fetching ---
-
+# --- Web Scraping Functions (Economic Times) ---
+# get_latest_news_date is needed by scrape_economic_times_headlines, fetch_news_from_finnhub, fetch_news_from_marketaux
 def get_latest_news_date(mongo_collection, source_name):
     """
     Retrieves the latest publication_date for a given source from MongoDB.
@@ -55,28 +59,6 @@ def get_latest_news_date(mongo_collection, source_name):
         return None
 
 
-def get_latest_market_data_date(mongo_collection, symbol):
-    """
-    Retrieves the latest date for a given stock symbol from MongoDB.
-    Returns datetime object or None if no data found.
-    """
-    if mongo_collection is None:
-        return None
-
-    latest_record = mongo_collection.find(
-        {"symbol": symbol, "date": {"$ne": None}}
-    ).sort("date", pymongo.DESCENDING).limit(1)
-
-    try:
-        latest = latest_record.next()
-        if isinstance(latest.get('date'), datetime):
-            return latest['date']
-        return None
-    except StopIteration:
-        return None
-
-
-# --- Web Scraping Functions (Economic Times) ---
 def get_html_content(url, retries=3, delay=2):
     """
     Fetches the HTML content of a given URL with retries and delays.
@@ -190,12 +172,10 @@ def scrape_economic_times_headlines(num_articles_limit=10, mongo_collection=None
     """
     Scrapes headlines and article URLs from Economic Times listing pages
     and optionally inserts them into the provided MongoDB collection.
-    It will try to only process articles newer than the latest found in DB.
     """
     all_articles_data = []
     seen_urls = set()
 
-    # Get the latest date for ET from DB for smart fetching
     latest_et_date_in_db = get_latest_news_date(mongo_collection, "Economic Times")
     if latest_et_date_in_db:
         print(
@@ -206,8 +186,6 @@ def scrape_economic_times_headlines(num_articles_limit=10, mongo_collection=None
     urls_to_scrape = [
         'https://economictimes.indiatimes.com/news/latest-news',
         'https://economictimes.indiatimes.com/markets/stocks/news',
-        # Removed 'https://economictimes.indiatimes.com/markets/et-markets/real-time-news' due to 404
-        # Add more specific ET URLs here if needed
     ]
 
     for page_url in urls_to_scrape:
@@ -240,19 +218,19 @@ def scrape_economic_times_headlines(num_articles_limit=10, mongo_collection=None
 
                 date_str = timestamp_tag['data-time']
                 formatted_date_str = None
-                article_date_obj = None  # Store as datetime for comparison
+                article_date_obj = None
 
                 try:
                     parsed_date_obj = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
                     formatted_date_str = parsed_date_obj.strftime('%Y-%m-%d')
-                    article_date_obj = parsed_date_obj  # Use this for comparison
+                    article_date_obj = parsed_date_obj
                 except ValueError:
                     display_date_text = timestamp_tag.get_text(strip=True)
                     match = re.search(r'\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},\s+\d{4}',
                                       display_date_text)
                     if match:
                         formatted_date_str = match.group(0)
-                        try:  # Attempt to parse the matched string into datetime for comparison
+                        try:
                             article_date_obj = datetime.strptime(formatted_date_str, '%b %d, %Y')
                         except ValueError:
                             pass
@@ -261,15 +239,13 @@ def scrape_economic_times_headlines(num_articles_limit=10, mongo_collection=None
                                           display_date_text)
                         if match:
                             formatted_date_str = match.group(0)
-                            try:  # Attempt to parse for comparison
+                            try:
                                 article_date_obj = datetime.strptime(formatted_date_str, '%d %b %Y')
                             except ValueError:
                                 pass
                         else:
                             formatted_date_str = display_date_text
 
-                # Smart Fetching for ET: Skip if article is older than latest in DB
-                # Only compare if we successfully parsed the article_date_obj and have a latest_et_date_in_db
                 if latest_et_date_in_db and article_date_obj and article_date_obj.date() <= latest_et_date_in_db.date():
                     print(
                         f"Skipping {article_url} (older than latest in DB: {latest_et_date_in_db.strftime('%Y-%m-%d')}).")
@@ -286,7 +262,7 @@ def scrape_economic_times_headlines(num_articles_limit=10, mongo_collection=None
                     if article_details:
                         article_details['title'] = title
                         article_details['date'] = formatted_date_str
-                        article_details['source'] = "Economic Times"  # Explicitly set source
+                        article_details['source'] = "Economic Times"
 
                         if mongo_collection is not None:
                             inserted_successfully = insert_article_into_mongodb(mongo_collection, article_details)
@@ -303,7 +279,7 @@ def scrape_economic_times_headlines(num_articles_limit=10, mongo_collection=None
                             'date': formatted_date_str,
                             'content': 'Failed to scrape full content from article page',
                             'url': article_url,
-                            'source': 'Economic Times',  # Explicitly set source
+                            'source': 'Economic Times',
                             'sentiment_score': None,
                             'companies_mentioned': [],
                             'sectors_mentioned': []
@@ -336,10 +312,9 @@ def fetch_news_from_finnhub(api_key, mongo_collection, num_articles_limit=15):
         return []
 
     latest_finnhub_date_in_db = get_latest_news_date(mongo_collection, "Finnhub")
-    # For Finnhub, 'from' parameter expects YYYY-MM-DD. Use latest_date_in_db + 1 day
     from_date_str = (latest_finnhub_date_in_db + timedelta(days=1)).strftime(
         '%Y-%m-%d') if latest_finnhub_date_in_db else None
-    to_date_str = datetime.now().strftime('%Y-%m-%d')  # Fetch up to today
+    to_date_str = datetime.now().strftime('%Y-%m-%d')
 
     if latest_finnhub_date_in_db:
         print(
@@ -347,7 +322,6 @@ def fetch_news_from_finnhub(api_key, mongo_collection, num_articles_limit=15):
     else:
         print("No Finnhub articles found in DB. Fetching recent news.")
 
-    # Ensure from_date_str is not in the future for Finnhub API call
     if from_date_str and datetime.strptime(from_date_str, '%Y-%m-%d').date() > datetime.now().date():
         print(f"Skipping Finnhub fetch: From date {from_date_str} is in the future.")
         return []
@@ -363,16 +337,14 @@ def fetch_news_from_finnhub(api_key, mongo_collection, num_articles_limit=15):
         params = {
             'category': category,
             'token': api_key,
-            # Use 'from' and 'to' for smart fetching
             'from': from_date_str if from_date_str else (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d'),
-            # Default to last 7 days if no existing data
             'to': to_date_str
         }
 
-        response = None  # Initialize response outside try block
+        response = None
         try:
             print(f"Fetching {category} news from Finnhub (from {params['from']} to {params['to']})...")
-            time.sleep(0.5)  # Small delay before request
+            time.sleep(0.5)
             response = requests.get(FINNHUB_NEWS_BASE_URL, params=params, timeout=15)
             response.raise_for_status()
             news_items = response.json()
@@ -419,7 +391,6 @@ def fetch_news_from_finnhub(api_key, mongo_collection, num_articles_limit=15):
             time.sleep(0.5)
 
         except requests.exceptions.RequestException as e:
-            # Safely access response.text here
             error_response_content = response.text[:200] if response is not None and hasattr(response,
                                                                                              'text') else 'N/A'
             print(f"Error fetching news from Finnhub API for category '{category}': {e}")
@@ -442,10 +413,10 @@ def fetch_news_from_marketaux(api_key, mongo_collection, num_articles_limit=15):
         print("MongoDB collection not available for Marketaux news. Aborting.")
         return []
 
+    # This relies on get_latest_news_date which is defined in this file.
     latest_marketaux_date_in_db = get_latest_news_date(mongo_collection, "Marketaux")
-    # Marketaux 'published_after' expects ISO format string
     published_after_date_str = (
-                latest_marketaux_date_in_db + timedelta(days=1)).isoformat() if latest_marketaux_date_in_db else None
+            latest_marketaux_date_in_db + timedelta(days=1)).isoformat() if latest_marketaux_date_in_db else None
 
     if latest_marketaux_date_in_db:
         print(
@@ -453,7 +424,6 @@ def fetch_news_from_marketaux(api_key, mongo_collection, num_articles_limit=15):
     else:
         print("No Marketaux articles found in DB. Fetching recent news.")
 
-    # Ensure published_after_date_str is not in the future
     if published_after_date_str and datetime.fromisoformat(
             published_after_date_str.replace('Z', '+00:00')).date() > datetime.now().date():
         print(f"Skipping Marketaux fetch: Published after date {published_after_date_str} is in the future.")
@@ -470,15 +440,14 @@ def fetch_news_from_marketaux(api_key, mongo_collection, num_articles_limit=15):
         'published_after': published_after_date_str  # Use 'published_after' for smart fetching
     }
 
-    # If no articles found, default to fetching last 7 days to populate initially
     if not published_after_date_str:
         params['published_after'] = (datetime.now() - timedelta(days=7)).isoformat()
 
-    response = None  # Initialize response outside try block
+    response = None
     try:
         print(
             f"Fetching news from Marketaux (published after {params['published_after'] if 'published_after' in params else 'start'})...")
-        time.sleep(0.5)  # Small delay before request
+        time.sleep(0.5)
         response = requests.get(MARKETAUX_NEWS_BASE_URL, params=params, timeout=15)
         response.raise_for_status()
 
@@ -559,31 +528,6 @@ def connect_to_mongodb(host='localhost', port=27017, db_name='indian_market_scan
         return None
 
 
-def connect_to_market_data_mongodb(host='localhost', port=27017, db_name='indian_market_scanner_db',
-                                   collection_name='historical_market_data'):
-    """
-    Establishes a connection to MongoDB and returns the market data collection object.
-    Creates a unique compound index on symbol and date.
-    """
-    try:
-        client = pymongo.MongoClient(host, port, serverSelectionTimeoutMS=5000)
-        client.admin.command('ismaster')
-        print(f"Successfully connected to MongoDB for market data at {host}:{port}")
-        db = client[db_name]
-        collection = db[collection_name]
-
-        collection.create_index([("symbol", pymongo.ASCENDING), ("date", pymongo.ASCENDING)], unique=True)
-        print(f"Ensured unique compound index on 'symbol' and 'date' for collection '{collection_name}'")
-
-        return collection
-    except ConnectionFailure as e:
-        print(f"Could not connect to MongoDB for market data: {e}. Please ensure MongoDB server is running.")
-        return None
-    except Exception as e:
-        print(f"An unexpected error occurred during MongoDB market data connection: {e}")
-        return None
-
-
 def insert_article_into_mongodb(collection, article_data):
     """
     Inserts a single news article document into the MongoDB collection.
@@ -593,7 +537,6 @@ def insert_article_into_mongodb(collection, article_data):
         print("MongoDB collection not available. Skipping insertion.")
         return False
 
-    # Ensure publication_date is a datetime object for better MongoDB querying
     if 'date' in article_data and isinstance(article_data['date'], str):
         try:
             parsed_date = datetime.strptime(article_data['date'], '%Y-%m-%d')
@@ -645,105 +588,6 @@ def insert_article_into_mongodb(collection, article_data):
         return False
 
 
-# --- Fetch Historical Market Data Function ---
-def fetch_historical_market_data(tickers, start_date_str, end_date_str, mongo_collection):
-    """
-    Fetches historical OHLCV data for given tickers using yfinance
-    and inserts/updates it into the MongoDB collection.
-    """
-    print("\n--- Phase 4: Fetching Historical Market Data ---")
-    if mongo_collection is None:
-        print("MongoDB market data collection not available. Aborting market data fetch.")
-        return 0
-
-    total_inserted_count = 0
-
-    for ticker in tickers:
-        # Determine start date for smart fetching
-        latest_date_in_db = get_latest_market_data_date(mongo_collection, ticker)
-
-        # Ensure latest_date_in_db is a datetime object before using timedelta/strftime
-        if latest_date_in_db and isinstance(latest_date_in_db, datetime):
-            # Fetch from one day after the latest date in DB
-            fetch_start_date_obj = latest_date_in_db + timedelta(days=1)
-            fetch_start_date_str = fetch_start_date_obj.strftime('%Y-%m-%d')
-            print(
-                f"Latest data for {ticker} in DB is {latest_date_in_db.strftime('%Y-%m-%d')}. Fetching from {fetch_start_date_str}...")
-        else:
-            # If no data in DB, fetch from the provided start_date_str
-            fetch_start_date_str = start_date_str
-            print(f"No data for {ticker} in DB. Fetching from {fetch_start_date_str}...")
-
-        # Ensure fetch_start_date_str is not in the future
-        if datetime.strptime(fetch_start_date_str, '%Y-%m-%d').date() > datetime.now().date():
-            print(f"Skipping {ticker}: Fetch start date {fetch_start_date_str} is in the future.")
-            continue
-
-        print(f"Fetching data for {ticker} from {fetch_start_date_str} to {end_date_str}...")
-        try:
-            data = yf.download(ticker, start=fetch_start_date_str, end=end_date_str)
-
-            if data.empty:
-                print(
-                    f"No new data found for {ticker} in the specified date range ({fetch_start_date_str} to {end_date_str}).")
-                continue
-
-            data.reset_index(inplace=True)
-
-            # --- REVISED FIX FOR DATE HANDLING ---
-            # Ensure the 'Date' column contains native Python datetime.datetime objects.
-            # This is robust for various yfinance/pandas outputs.
-            data['Date'] = pd.to_datetime(data['Date'])
-            # --- END REVISED FIX ---
-
-            inserted_count_for_ticker = 0
-
-            for index, row in data.iterrows():
-                # Get the date as a native Python datetime.date object.
-                # row['Date'] is a pandas Timestamp (which is like a datetime.datetime).
-                # Calling .date() on it directly gets the datetime.date object.
-                record_date = row['Date'].date()
-
-                market_record = {
-                    'symbol': ticker,
-                    'date': record_date,  # Stored as datetime.date object
-                    'open': row['Open'].item(),
-                    'high': row['High'].item(),
-                    'low': row['Low'].item(),
-                    'close': row['Close'].item(),
-                    'volume': row['Volume'].item()
-                }
-
-                try:
-                    result = mongo_collection.update_one(
-                        {'symbol': ticker, 'date': record_date},
-                        {'$set': market_record},
-                        upsert=True
-                    )
-
-                    if result.upserted_id:
-                        inserted_count_for_ticker += 1
-                        total_inserted_count += 1
-                    # No explicit print for existing/modified for brevity here
-
-                except DuplicateKeyError:
-                    date_for_print = record_date.strftime('%Y-%m-%d')  # This should now work reliably
-                    print(f"  Duplicate record for {ticker} on {date_for_print}. Skipped by unique index.")
-                except Exception as e:
-                    date_for_print = record_date.strftime('%Y-%m-%d')  # This should now work reliably
-                    print(f"  Error inserting/updating {ticker} on {date_for_print}: {e}")
-
-            print(f"Successfully processed {inserted_count_for_ticker} new/updated records for {ticker}.")
-            time.sleep(1)
-
-        # ... (rest of the fetch_historical_market_data function and the file) ...
-        except Exception as e:
-            print(f"Failed to fetch or process data for {ticker}: {e}")
-
-    print(f"\nHistorical market data collection complete. Total new/updated records: {total_inserted_count}.")
-    return total_inserted_count
-
-
 # --- Main Execution Block ---
 if __name__ == "__main__":
     print("Starting news and market data processing pipeline...")
@@ -771,7 +615,7 @@ if __name__ == "__main__":
         # 1. Economic Times Web Scraping (As requested, kept active for specific news redirection)
         print("\n--- Phase 1 & 2: Data Collection via Economic Times Scraper ---")
         et_scraped_summary = scrape_economic_times_headlines(
-            num_articles_limit=15,  # Adjust limit as desired
+            num_articles_limit=15,
             mongo_collection=mongo_news_collection
         )
         if et_scraped_summary:
@@ -822,15 +666,16 @@ if __name__ == "__main__":
             # Add more as needed
         ]
 
-        # Fetch data for the last 5 years from today (as a base, will update incrementally)
-        today_date = datetime.now()  # Use a distinct variable name
-        start_date_hist = (today_date - timedelta(days=5 * 365)).strftime('%Y-%m-%d')  # Base start date for new symbols
-        end_date_hist = today_date.strftime('%Y-%m-%d')  # Always fetch up to today
+        # Fetch data for the last 5 years from today
+        today_date = datetime.now()
+        start_date_hist = (today_date - timedelta(days=5 * 365)).strftime('%Y-%m-%d')
+        end_date_hist = today_date.strftime('%Y-%m-%d')
 
+        # Use imported fetch_historical_market_data
         total_market_data_records = fetch_historical_market_data(
             tickers=nifty_index_tickers,
-            start_date_str=start_date_hist,  # Pass as string
-            end_date_str=end_date_hist,  # Pass as string
+            start_date_str=start_date_hist,
+            end_date_str=end_date_hist,
             mongo_collection=mongo_market_data_collection
         )
         if total_market_data_records > 0:
