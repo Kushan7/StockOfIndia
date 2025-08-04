@@ -14,6 +14,13 @@ from dotenv import load_dotenv
 
 from nlp_processor import process_and_update_sentiment, process_and_update_entities
 
+
+from market_data_collector import connect_to_market_data_mongodb, fetch_historical_market_data
+
+# NEW: Import insights generation function from insights_generator.py
+from insights_generator import connect_to_insights_mongodb, generate_and_store_insights
+
+
 # NEW: Import market data functions from market_data_collector.py
 from market_data_collector import connect_to_market_data_mongodb, fetch_historical_market_data
 
@@ -424,14 +431,8 @@ def insert_article_into_mongodb(collection, article_data):
 if __name__ == "__main__":
     print("Starting news and market data processing pipeline...")
 
-    # --- API Key Checks ---
-    if not FINNHUB_API_KEY:
-        print("Error: FINNHUB_API_KEY not found in .env file or environment variables.")
-        print("Please ensure you have FINNHUB_API_KEY=YOUR_KEY_HERE in your .env file.")
-        exit(1)
-    if not MARKETAUX_API_KEY:
-        print("Error: MARKETAUX_API_KEY not found in .env file or environment variables.")
-        print("Please ensure you have MARKETAUX_API_KEY=YOUR_KEY_HERE in your .env file.")
+    if not os.getenv('FINNHUB_API_KEY') or not os.getenv('MARKETAUX_API_KEY'):
+        print("Error: API keys not found in .env file.")
         exit(1)
 
     # --- MongoDB Connections ---
@@ -439,25 +440,29 @@ if __name__ == "__main__":
     mongo_market_data_collection = connect_to_market_data_mongodb(db_name='indian_market_scanner_db',
                                                                   collection_name='historical_market_data')
 
-    if mongo_news_collection is not None and mongo_market_data_collection is not None:
+    # NEW: Connect to the insights collection
+    mongo_insights_collection = connect_to_insights_mongodb(db_name='indian_market_scanner_db',
+                                                            collection_name='insights')
+
+    if mongo_news_collection is not None and mongo_market_data_collection is not None and mongo_insights_collection is not None:
         print("\nAll MongoDB connections established. Proceeding with data collection and processing.")
 
         # --- Phase 1 & 2: Data Collection ---
-
-        # 1. Economic Times Web Scraping (As requested, kept active for specific news redirection)
+        # ... (Calls to ET scraper, Finnhub, Marketaux all remain the same) ...
         print("\n--- Phase 1 & 2: Data Collection via Economic Times Scraper ---")
         et_scraped_summary = scrape_economic_times_headlines(
             num_articles_limit=15,
-            mongo_collection=mongo_news_collection
+            get_latest_news_date_func=get_latest_news_date,
+            insert_article_func=insert_article_into_mongodb
         )
         if et_scraped_summary:
             print(f"\nEconomic Times scraping complete. Processed {len(et_scraped_summary)} articles.")
         else:
             print("No new articles scraped from Economic Times or an error occurred.")
 
-        # 2. Finnhub API News
+        print("\n--- Phase 1 & 2: Data Collection via Finnhub API ---")
         finnhub_news_summary = fetch_news_from_finnhub(
-            api_key=FINNHUB_API_KEY,
+            api_key=os.getenv('FINNHUB_API_KEY'),
             mongo_collection=mongo_news_collection,
             num_articles_limit=20
         )
@@ -466,9 +471,9 @@ if __name__ == "__main__":
         else:
             print("No new articles fetched from Finnhub or an error occurred during collection.")
 
-        # 3. Marketaux API News
+        print("\n--- Phase 1 & 2: Data Collection via Marketaux API ---")
         marketaux_news_summary = fetch_news_from_marketaux(
-            api_key=MARKETAUX_API_KEY,
+            api_key=os.getenv('MARKETAUX_API_KEY'),
             mongo_collection=mongo_news_collection,
             num_articles_limit=20
         )
@@ -486,19 +491,10 @@ if __name__ == "__main__":
 
         # --- Phase 4: Historical Market Data ---
         nifty_index_tickers = [
-            '^NSEI',  # Nifty 50
-            '^NSEBANK',  # Nifty Bank
-            '^CNXIT',  # Nifty IT
-            '^CNXAUTO',  # Nifty Auto
-            # '^CNXPHARM',# Removed as it was causing 404 errors
-            '^CNXFMCG',  # Nifty FMCG
-            '^CNXMETAL',  # Nifty Metal
-            '^CNXMEDIA',  # Nifty Media
-            '^CNXREALTY',  # Nifty Realty
-            # Add more as needed
+            '^NSEI', '^NSEBANK', '^CNXIT', '^CNXAUTO',
+            '^CNXFMCG', '^CNXMETAL', '^CNXMEDIA', '^CNXREALTY'
         ]
 
-        # Fetch data for the last 5 years from today
         today_date = dt_class.now()
         start_date_hist = (today_date - timedelta(days=5 * 365)).strftime('%Y-%m-%d')
         end_date_hist = today_date.strftime('%Y-%m-%d')
@@ -514,13 +510,18 @@ if __name__ == "__main__":
         else:
             print("\nNo new market data records collected or an error occurred.")
 
+        # --- NEW: Phase 5: Generating and Storing Insights ---
+        generate_and_store_insights(
+            mongo_news_collection,
+            mongo_market_data_collection
+        )
+
     else:
         print("\nFailed to connect to MongoDB. All processing aborted.")
 
     print("\nProject execution complete. Check your MongoDB for:")
     print("  - News Articles (indian_market_scanner_db -> news_articles)")
     print("  - Historical Market Data (indian_market_scanner_db -> historical_market_data)")
+    print("  - New Insights (indian_market_scanner_db -> insights)")
     print(
-        "\nExample mongosh query for news: `use indian_market_scanner_db; db.news_articles.find({'sentiment_score': {'$ne': null}}).limit(1).pretty()`")
-    print(
-        "Example mongosh query for market data: `use indian_market_scanner_db; db.historical_market_data.find({'symbol': '^NSEI'}).sort({'date': -1}).limit(5).pretty()`")
+        "\nExample mongosh query for insights: `use indian_market_scanner_db; db.insights.find().sort({'date': -1}).limit(5).pretty()`")
