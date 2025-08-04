@@ -4,16 +4,14 @@ import requests
 from bs4 import BeautifulSoup
 import time
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
+import pymongo # Needed for the mock DB in the test block
 
-# Note: This file needs these imports because the functions within it use them directly.
-import pymongo
-
-
-# For the test execution block, we will use a Mock DB, so these imports are not strictly needed
-# for the main functions, but they are here for the test harness.
+# Import helper functions from the main database manager file
+from database_manager import get_latest_news_date, insert_article_into_mongodb
 
 
+# --- Web Scraping Helper Functions (Specific to ET structure) ---
 def get_html_content(url, retries=3, delay=2):
     """
     Fetches the HTML content of a given URL with retries and delays.
@@ -36,10 +34,10 @@ def get_html_content(url, retries=3, delay=2):
                 return None
     return None
 
-
 def parse_article_page(article_url):
     """
     Parses a single Economic Times article page to extract title, date, and content.
+    The final strategy for ET is to only extract metadata.
     """
     print(f"Scraping article content: {article_url}")
     html_content = get_html_content(article_url)
@@ -79,129 +77,139 @@ def parse_article_page(article_url):
             if match:
                 date = match.group(0)
 
-    # --- Extract Article Content (REFINED STRATEGY - Broadened Search & Aggressive Filtering) ---
-    all_content_chunks = []
-    content_container_selectors = [
-        {'name': 'div', 'attrs': {'data-articlebody': '1'}},
-        {'name': 'div', 'attrs': {'class': 'arttextmedium'}},
-        {'name': 'div', 'attrs': {'class': 'arttext'}},
-        {'name': 'div', 'attrs': {'class': lambda x: x and 'artdata' in x.split()}},
-        {'name': 'div', 'attrs': {'id': 'pagecontent'}},
-        {'name': 'section', 'attrs': {'itemprop': 'articleBody'}},
-        {'name': 'div', 'attrs': {'class': 'Normal'}}
-    ]
-    main_content_area = None
-    for selector in content_container_selectors:
-        main_content_area = soup.find(selector['name'], selector['attrs'])
-        if main_content_area:
-            break
-    if not main_content_area:
-        print(f"Warning: Main content container not found for {article_url}. Falling back to generic paragraphs.")
-        paragraphs = soup.find_all('p')
-        if paragraphs:
-            for p in paragraphs:
-                all_content_chunks.append(p.get_text(separator=' ', strip=True))
-    else:
-        text_containing_elements = main_content_area.find_all(
-            ['div', 'p', 'span', 'strong', 'em', 'li', 'h1', 'h2', 'h3', 'h4', 'a'])
-        non_content_filters = (
-            "read more:", "also read:", "download the economic times app",
-            "by downloading the app", "follow us on", "join us on",
-            "view more", "watch now", "trending now",
-            "et prime", "to see how", "track live", "go to the", "for full story",
-            "terms of use", "privacy policy", "cookie policy", "disclaimer",
-            "all rights reserved", "copyright", "subscribe", "newsletter", "sign in",
-            "log in", "photo gallery", "in pics", "videos", "podcast", "topics", "agencies",
-            "pti", "ani", "ap", "reuters", "bloomberg", "et now", "et wealth", "et auto",
-            "et government", "et retail", "et bfsi", "et markets", "et hrworld", "et energy",
-            "et telecom", "et panache", "et realty", "et healthworld", "et tech", "et travel"
-        )
-        non_content_exact = (
-            "et", "live", "more", "full story", "download", "app", "prime", "english", "hindi",
-            "subscribe", "read", "share", "connect"
-        )
-        non_content_contains = (
-            "stock market", "budget 2025", "latest news updates", "breaking news",
-            "stories you might be interested in", "hot on web", "in case you missed it",
-            "top searched companies", "top calculators", "top definitions", "top commodities",
-            "top slideshow", "private companies", "top prime articles", "top story listing",
-            "follow us on", "find this comment offensive", "reason for reporting",
-            "your reason has been reported", "log in/connect with", "will be displayed",
-            "will not be displayed", "worry not", "et prime membership", "offer exclusively for you",
-            "save up to rs", "get 1 year free", "with 1 and 2-year et prime membership",
-            "get flat", "on etprime", "then ₹", "for 1 month", "what’s included with",
-            "grow your wealth", "buy low & sell high", "access to stock score",
-            "upside potential", "market bulls are investing", "stock analyzer",
-            "check the score based on", "fundamentals, solvency, growth", "risk & ownership",
-            "market mood", "analyze the market sentiments", "trend reversal",
-            "stock talk live", "ask your stock queries", "get assured replies by",
-            "sebi registered experts", "epaper - print view", "read the pdf version",
-            "download & access it offline", "epaper - digital view", "read your daily newspaper",
-            "wealth edition", "manage your money efficiently", "toi epaper",
-            "deep explainers", "health+ stories", "personal finance+ stories",
-            "new york times exclusives", "timesprime subscription", "access 20+ premium subscriptions",
-            "docubay subscription", "stream new documentaries", "leadership | entrepreneurship",
-            "people | culture", "from new delhi", "PTI", "ANI", "AP", "REUTERS", "BLOOMBERG"
-        )
-        non_content_ends = (
-            "ist", "comments", "shares", "update", "more", "story"
-        )
-        regex_filters = [
-            r"^\s*\d{1,2}:\d{2}\s+(am|pm)\s+ist\s*$",
-            r"^\s*\w{3,4}\s+\d{1,2},\s+\d{4},\s+\d{1,2}:\d{2}\s+(am|pm)\s+ist\s*$",
-            r"^\s*\d{1,3}k\s+shares\s*$",
-            r"^\s*-\s*[A-Za-z\s]+?\s*-\s*$",
-            r"^\s*\(pti\)\s*$",
-            r"^\d{1,}\s+comments?$",
-            r"^\s*follow us on telegram",
-            r"read more news on", "read more business news"
-        ]
-        compiled_regexes = [re.compile(pattern, re.IGNORECASE) for pattern in regex_filters]
-
-        for element in text_containing_elements:
-            text_chunk = element.get_text(separator=' ', strip=True)
-            if not text_chunk:
-                continue
-            text_chunk_lower = text_chunk.lower()
-            if any(text_chunk_lower.startswith(phrase) for phrase in non_content_starters) or \
-                    any(text_chunk_lower.endswith(phrase) for phrase in non_content_ends) or \
-                    any(text_chunk_lower == phrase for phrase in non_content_exact) or \
-                    any(phrase in text_chunk_lower for phrase in non_content_contains) or \
-                    any(regex.search(text_chunk_lower) for regex in compiled_regexes) or \
-                    (element.get('class') and any(
-                        indicator in class_name.lower() for class_name in element.get('class', []) for indicator in
-                        ["ad", "widget", "sponsored", "promo", "related"])) or \
-                    (element.get('id') and any(
-                        indicator in element.get('id').lower() for indicator in ["ad", "widget", "promo", "related"])):
-                continue
-
-            if len(text_chunk) < 70:
-                if element.name not in ['h1', 'h2', 'h3', 'h4', 'a', 'strong', 'em']:
-                    continue
-
-            all_content_chunks.append(text_chunk)
-
-    full_content_str = "\n".join(all_content_chunks)
-    if not title or len(full_content_str) < 150:
-        print(
-            f"Warning: Significant content (>=150 chars) not extracted for {article_url}. Title: '{title[:50]}...' Content len: {len(full_content_str)}")
-        return None
-
+    # --- FINAL STRATEGY FOR ET: ONLY EXTRACT METADATA ---
+    # Content is deliberately left empty to avoid scraping issues
     return {
         'title': title,
         'date': date,
-        'content': full_content_str,
+        'content': "",  # Leave content empty to avoid pollution
         'url': article_url,
         'source': 'Economic Times'
     }
 
 
-# --- Main ET Scraping Function ---
-# FIX: Change signature to accept mongo_collection directly
 def scrape_economic_times_headlines(mongo_collection, num_articles_limit=10):
     """
     Scrapes headlines and article URLs from Economic Times listing pages
     and optionally inserts them into the provided MongoDB collection.
+    It will only fetch metadata (title, URL, date) for ET articles.
     """
-    # ... (function content below remains the same, it will now use 'mongo_collection' directly) ...
-    pass  # Placeholder for content, see next code block
+    if mongo_collection is None:
+        print("Error: DB collection not provided. Aborting ET scraper.")
+        return []
+
+    all_articles_data = []
+    seen_urls = set()
+
+    latest_et_date_in_db = get_latest_news_date(mongo_collection, "Economic Times")
+    if latest_et_date_in_db:
+        print(
+            f"Latest Economic Times article in DB is from: {latest_et_date_in_db.strftime('%Y-%m-%d')}. Fetching newer news.")
+    else:
+        print("No Economic Times articles found in DB. Fetching recent news.")
+
+    urls_to_scrape = [
+        'https://economictimes.indiatimes.com/news/latest-news',
+        'https://economictimes.indiatimes.com/markets/stocks/news',
+    ]
+
+    for page_url in urls_to_scrape:
+        print(f"Fetching news from listing page: {page_url}")
+        html_content = get_html_content(page_url)
+        if not html_content:
+            continue
+
+        soup = BeautifulSoup(html_content, 'lxml')
+
+        news_list_container = soup.find('ul', class_='data')
+
+        if not news_list_container:
+            print(f"Could not find news list container on {page_url}. Please re-check HTML structure.")
+            continue
+
+        news_items = news_list_container.find_all('li', itemprop='itemListElement')
+
+        if not news_items:
+            print(f"No news items found within the container on {page_url}. Please re-check LI structure.")
+            continue
+
+        for item in news_items:
+            link_tag = item.find('a', href=True)
+            timestamp_tag = item.find('span', class_='timestamp', attrs={'data-time': True})
+
+            if link_tag and timestamp_tag:
+                title = link_tag.get_text(strip=True)
+                article_url = link_tag['href']
+
+                date_str = timestamp_tag['data-time']
+                formatted_date_str = None
+                article_date_obj = None
+
+                try:
+                    parsed_date_obj = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+                    formatted_date_str = parsed_date_obj.strftime('%Y-%m-%d')
+                    article_date_obj = parsed_date_obj
+                except ValueError:
+                    display_date_text = timestamp_tag.get_text(strip=True)
+                    match = re.search(r'\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},\s+\d{4}',
+                                      display_date_text)
+                    if match:
+                        formatted_date_str = match.group(0)
+                        try:
+                            article_date_obj = datetime.strptime(formatted_date_str, '%b %d, %Y')
+                        except ValueError:
+                            pass
+                    else:
+                        match = re.search(r'\d{1,2}\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}',
+                                          display_date_text)
+                        if match:
+                            formatted_date_str = match.group(0)
+                            try:
+                                article_date_obj = datetime.strptime(formatted_date_str, '%d %b %Y')
+                            except ValueError:
+                                pass
+                        else:
+                            formatted_date_str = display_date_text
+
+                if latest_et_date_in_db and article_date_obj and article_date_obj.date() <= latest_et_date_in_db.date():
+                    print(
+                        f"Skipping {article_url} (older than latest in DB: {latest_et_date_in_db.strftime('%Y-%m-%d')}).")
+                    continue
+
+                if not article_url.startswith('http'):
+                    article_url = f"https://economictimes.indiatimes.com{article_url}"
+
+                if "/articleshow/" in article_url and "economictimes.indiatimes.com" in article_url and article_url not in seen_urls:
+                    print(f"Attempting to process article: {article_url}")
+
+                    article_details = {
+                        'title': title,
+                        'date': formatted_date_str,
+                        'content': "",
+                        'url': article_url,
+                        'source': 'Economic Times',
+                        'sentiment_score': None,
+                        'companies_mentioned': [],
+                        'sectors_mentioned': []
+                    }
+
+                    if article_details['title'] and article_details['url']:
+                        inserted_successfully = insert_article_into_mongodb(mongo_collection, article_details)
+                        if inserted_successfully:
+                            all_articles_data.append(article_details)
+                        else:
+                            all_articles_data.append(article_details)
+                    else:
+                        print(f"Warning: Missing title or URL for article: {article_url}. Skipping.")
+
+                    seen_urls.add(article_url)
+                    time.sleep(1.5)
+
+                if len(all_articles_data) >= num_articles_limit:
+                    print(f"Reached article limit ({num_articles_limit}) for testing, stopping.")
+                    break
+
+        if len(all_articles_data) >= num_articles_limit:
+            break
+
+    return all_articles_data
