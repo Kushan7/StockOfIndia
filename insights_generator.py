@@ -3,43 +3,20 @@
 import pandas as pd
 from datetime import datetime, timedelta
 import pymongo
-# FIX: Import ConnectionError from requests, and other errors from pymongo.errors
-import requests
-from pymongo.errors import ConnectionFailure, InvalidDocument
 import numpy as np
 
-
-# We'll need a MongoDB connection function to run this independently,
-# but when called from database_manager.py, we'll pass the collection objects.
-def connect_to_insights_mongodb(host='localhost', port=27017, db_name='indian_market_scanner_db',
-                                collection_name='insights'):
-    """
-    Establishes a connection to MongoDB and returns the insights collection.
-    """
-    try:
-        client = pymongo.MongoClient(host, port, serverSelectionTimeoutMS=5000)
-        client.admin.command('ismaster')
-        print(f"Successfully connected to MongoDB for insights at {host}:{port}")
-        db = client[db_name]
-        collection = db[collection_name]
-        return collection
-    # FIX: Catch pymongo.errors.ConnectionFailure directly
-    except ConnectionFailure as e:
-        print(f"Failed to connect to MongoDB for insights: {e}")
-        return None
-    except Exception as e:
-        print(f"An unexpected error occurred during MongoDB connection for insights: {e}")
-        return None
+# We'll need a simple MongoDB connection function for the main orchestrator, but here we just need pymongo
+from pymongo.errors import InvalidDocument
 
 
-def generate_and_store_insights(news_collection, market_data_collection):
+def generate_and_store_insights(news_collection, market_data_collection, insights_collection):
     """
     Generates and stores market insights based on aggregated news sentiment
     and historical market data.
     """
     print("\n--- Phase 5: Generating Correlation and Insights ---")
 
-    if news_collection is None or market_data_collection is None:
+    if news_collection is None or market_data_collection is None or insights_collection is None:
         print("Required MongoDB collections are not available. Aborting insight generation.")
         return 0
 
@@ -72,7 +49,7 @@ def generate_and_store_insights(news_collection, market_data_collection):
     # 3. Join sentiment with market data
     print("Joining sentiment data with market data...")
     # The market_df has symbols like '^NSEBANK', sentiment_by_sector has names like 'Banking & Financial Services'
-    # We need a mapping. We'll use the one defined in nlp_processor, but let's define a simple one here for now.
+    # We need a mapping.
     sector_to_ticker_mapping = {
         'Banking & Financial Services': '^NSEBANK',
         'Information Technology': '^CNXIT',
@@ -89,12 +66,11 @@ def generate_and_store_insights(news_collection, market_data_collection):
 
     market_df['sector'] = market_df['symbol'].map(ticker_to_sector_mapping)
 
-    # Now merge the two dataframes on 'date' and 'sector'
     insights_df = pd.merge(
         sentiment_by_sector,
         market_df,
         on=['date', 'sector'],
-        how='inner'  # Only keep records where both news and market data exist for a date/sector
+        how='inner'
     )
 
     if insights_df.empty:
@@ -103,7 +79,6 @@ def generate_and_store_insights(news_collection, market_data_collection):
 
     # 4. Calculate market trends (SMAs)
     print("Calculating market trends and signals...")
-    # Sort by ticker and date for correct SMA calculation
     insights_df.sort_values(['sector', 'date'], inplace=True)
     insights_df['sma_20'] = insights_df.groupby('sector')['Close'].transform(lambda x: x.rolling(window=20).mean())
     insights_df['sma_50'] = insights_df.groupby('sector')['Close'].transform(lambda x: x.rolling(window=50).mean())
@@ -120,10 +95,6 @@ def generate_and_store_insights(news_collection, market_data_collection):
 
     # 6. Store final insights in a new collection
     print("Storing final insights in MongoDB...")
-    insights_collection = connect_to_insights_mongodb()
-    if insights_collection is None:
-        print("Failed to connect to insights DB. Aborting.")
-        return 0
 
     insights_collection.delete_many({})  # Drop existing insights for a clean update
 
@@ -135,7 +106,6 @@ def generate_and_store_insights(news_collection, market_data_collection):
             insights_collection.insert_many(records_to_insert)
             inserted_count = len(records_to_insert)
             print(f"Successfully inserted {inserted_count} insight records.")
-        # FIX: Catch the specific pymongo error for invalid documents
         except InvalidDocument as e:
             print(f"Error inserting insights into DB: InvalidDocument: {e}. Check data types.")
         except Exception as e:
@@ -146,14 +116,31 @@ def generate_and_store_insights(news_collection, market_data_collection):
 
 # --- Test execution block (run independently) ---
 if __name__ == '__main__':
-    # You would need to have both collections populated before running this block
-    # from your main database_manager.py script first.
-    mongo_news_collection_test = pymongo.MongoClient().indian_market_scanner_db.news_articles
-    mongo_market_data_collection_test = pymongo.MongoClient().indian_market_scanner_db.historical_market_data
+    print("--- Running Insights Generator Separately for Testing ---")
+    print("NOTE: This requires 'news_articles' and 'historical_market_data' collections to be pre-populated.")
 
-    # Call the main function
-    total_insights_generated = generate_and_store_insights(
-        mongo_news_collection_test,
-        mongo_market_data_collection_test
-    )
-    print(f"Total insights generated and stored: {total_insights_generated}")
+
+    # We will define a mock connection function here for standalone testing
+    def mock_connect_to_db(db_name, collection_name):
+        try:
+            client = pymongo.MongoClient("mongodb://localhost:27017/")
+            db = client[db_name]
+            return db[collection_name]
+        except Exception as e:
+            print(f"Mock DB connection failed: {e}")
+            return None
+
+
+    mongo_news_collection_test = mock_connect_to_db("indian_market_scanner_db", "news_articles")
+    mongo_market_data_collection_test = mock_connect_to_db("indian_market_scanner_db", "historical_market_data")
+    mongo_insights_collection_test = mock_connect_to_db("indian_market_scanner_db", "insights")
+
+    if mongo_news_collection_test and mongo_market_data_collection_test and mongo_insights_collection_test:
+        total_insights_generated = generate_and_store_insights(
+            mongo_news_collection_test,
+            mongo_market_data_collection_test,
+            mongo_insights_collection_test
+        )
+        print(f"Total insights generated and stored: {total_insights_generated}")
+    else:
+        print("Test collections not available. Aborting.")

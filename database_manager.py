@@ -310,7 +310,7 @@ def fetch_news_from_marketaux(api_key, mongo_collection, num_articles_limit=15):
 
     except requests.exceptions.RequestException as e:
         error_response_content = response.text[:200] if response is not None and hasattr(response, 'text') else 'N/A'
-        print(f"Error fetching news from Marketaux API for category '{category}': {e}")
+        print(f"Error fetching news from Marketaux API: {e}")
         print(f"Response content: {error_response_content}")
     except Exception as e:
         print(f"An unexpected error occurred processing Marketaux news for category '{category}': {e}")
@@ -319,7 +319,6 @@ def fetch_news_from_marketaux(api_key, mongo_collection, num_articles_limit=15):
     return all_fetched_articles
 
 
-# --- MongoDB Connection Functions ---
 def connect_to_mongodb(host='localhost', port=27017, db_name='indian_market_scanner_db',
                        collection_name='news_articles'):
     """
@@ -404,6 +403,16 @@ def insert_article_into_mongodb(collection, article_data):
         return False
 
 
+def get_latest_news_date_for_et(mongo_collection, source_name):
+    # This helper is needed locally for ET scraper
+    return get_latest_news_date(mongo_collection, source_name)
+
+
+def insert_article_into_mongodb_for_et(mongo_collection, article_data):
+    # This helper is needed locally for ET scraper
+    return insert_article_into_mongodb(mongo_collection, article_data)
+
+
 # --- Main Execution Block ---
 if __name__ == "__main__":
     print("Starting news and market data processing pipeline...")
@@ -479,7 +488,7 @@ if __name__ == "__main__":
         total_market_data_records = fetch_historical_market_data(
             tickers=nifty_index_tickers,
             start_date_str=start_date_hist,
-            end_date_hist=end_date_hist,
+            end_date_str=end_date_hist,
             mongo_collection=mongo_market_data_collection
         )
         if total_market_data_records > 0:
