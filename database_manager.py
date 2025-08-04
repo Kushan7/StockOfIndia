@@ -11,6 +11,7 @@ from pymongo.errors import ConnectionFailure, DuplicateKeyError
 import os
 from dotenv import load_dotenv
 
+# Import NLP processing functions from the new file
 from nlp_processor import process_and_update_sentiment, process_and_update_entities
 
 # NEW: Import market data functions from the new file
@@ -31,7 +32,8 @@ FINNHUB_NEWS_BASE_URL = 'https://finnhub.io/api/v1/news'
 MARKETAUX_NEWS_BASE_URL = 'https://api.marketaux.com/v1/news/all'
 
 
-# --- Helper Function for Caching/Smart Fetching (for news) ---
+# --- Helper Function for Caching/Smart Fetching (for news APIs) ---
+# This remains in database_manager.py as it's general for news sources (ET, Finnhub, Marketaux)
 def get_latest_news_date(mongo_collection, source_name):
     """
     Retrieves the latest publication_date for a given source from MongoDB.
@@ -314,13 +316,12 @@ def fetch_news_from_marketaux(api_key, mongo_collection, num_articles_limit=15):
         print(f"Error fetching news from Marketaux API: {e}")
         print(f"Response content: {error_response_content}")
     except Exception as e:
-        print(f"An unexpected error occurred processing Marketaux news for category '{}': {e}")
+        print(f"An unexpected error occurred processing Marketaux news for category '{category}': {e}")
 
     print(f"Marketaux news collection complete. Inserted {processed_count} new/updated articles.")
     return all_fetched_articles
 
 
-# --- MongoDB Connection Functions ---
 def connect_to_mongodb(host='localhost', port=27017, db_name='indian_market_scanner_db',
                        collection_name='news_articles'):
     """
@@ -398,7 +399,7 @@ def insert_article_into_mongodb(collection, article_data):
             return False
 
     except DuplicateKeyError:
-        print(f"Duplicate key error for URL: {article_data['url']}. Article already exists.")
+        print(f"Duplicate key key error for URL: {article_data['url']}. Article already exists.")
         return False
     except Exception as e:
         print(f"Error inserting/updating article {article_data.get('url', 'N/A')}: {e}")
@@ -480,7 +481,7 @@ if __name__ == "__main__":
         total_market_data_records = fetch_historical_market_data(
             tickers=nifty_index_tickers,
             start_date_str=start_date_hist,
-            end_date_str=end_date_hist,
+            end_date_hist=end_date_hist,
             mongo_collection=mongo_market_data_collection
         )
         if total_market_data_records > 0:
