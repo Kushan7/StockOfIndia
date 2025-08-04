@@ -13,10 +13,11 @@ from dotenv import load_dotenv
 
 from nlp_processor import process_and_update_sentiment, process_and_update_entities
 
-from market_data_collector import connect_to_market_data_mongodb, fetch_historical_market_data, \
-    get_latest_market_data_date
+from market_data_collector import connect_to_market_data_mongodb, fetch_historical_market_data
 
 from et_news_scraper import scrape_economic_times_headlines
+
+from insights_generator import generate_and_store_insights
 
 # --- Load Environment Variables ---
 load_dotenv()
@@ -401,16 +402,6 @@ def insert_article_into_mongodb(collection, article_data):
     except Exception as e:
         print(f"Error inserting/updating article {article_data.get('url', 'N/A')}: {e}")
         return False
-
-
-def get_latest_news_date_for_et(mongo_collection, source_name):
-    # This helper is needed locally for ET scraper
-    return get_latest_news_date(mongo_collection, source_name)
-
-
-def insert_article_into_mongodb_for_et(mongo_collection, article_data):
-    # This helper is needed locally for ET scraper
-    return insert_article_into_mongodb(mongo_collection, article_data)
 
 
 # --- Main Execution Block ---

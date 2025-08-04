@@ -5,8 +5,29 @@ from datetime import datetime, timedelta
 import pymongo
 import numpy as np
 
-# We'll need a simple MongoDB connection function for the main orchestrator, but here we just need pymongo
 from pymongo.errors import InvalidDocument
+
+
+# We'll need a MongoDB connection function to run this independently,
+# but when called from database_manager.py, we'll pass the collection objects.
+def connect_to_insights_mongodb(host='localhost', port=27017, db_name='indian_market_scanner_db',
+                                collection_name='insights'):
+    """
+    Establishes a connection to MongoDB and returns the insights collection.
+    """
+    try:
+        client = pymongo.MongoClient(host, port, serverSelectionTimeoutMS=5000)
+        client.admin.command('ismaster')
+        print(f"Successfully connected to MongoDB for insights at {host}:{port}")
+        db = client[db_name]
+        collection = db[collection_name]
+        return collection
+    except pymongo.errors.ConnectionFailure as e:
+        print(f"Failed to connect to MongoDB for insights: {e}")
+        return None
+    except Exception as e:
+        print(f"An unexpected error occurred during MongoDB connection for insights: {e}")
+        return None
 
 
 def generate_and_store_insights(news_collection, market_data_collection, insights_collection):
@@ -22,8 +43,11 @@ def generate_and_store_insights(news_collection, market_data_collection, insight
 
     # 1. Fetch data from MongoDB
     print("Fetching news articles and market data from MongoDB...")
-    news_df = pd.DataFrame(list(news_collection.find({'sentiment_score': {'$ne': None}})))
-    market_df = pd.DataFrame(list(market_data_collection.find()))
+    news_data = list(news_collection.find({'sentiment_score': {'$ne': None}}))
+    market_data = list(market_data_collection.find())
+
+    news_df = pd.DataFrame(news_data)
+    market_df = pd.DataFrame(market_data)
 
     if news_df.empty or market_df.empty:
         print("Not enough data to generate insights. Please run the data collectors first.")
@@ -31,7 +55,7 @@ def generate_and_store_insights(news_collection, market_data_collection, insight
 
     # Clean up dataframes
     news_df['publication_date'] = pd.to_datetime(news_df['publication_date']).dt.date
-    market_df['date'] = pd.to_datetime(market_df['date']).dt.date
+    market_df['date'] = pd.to_datetime(market_df['date'])
 
     # 2. Aggregate sentiment by sector and date
     print("Aggregating sentiment by sector and date...")
@@ -48,8 +72,6 @@ def generate_and_store_insights(news_collection, market_data_collection, insight
 
     # 3. Join sentiment with market data
     print("Joining sentiment data with market data...")
-    # The market_df has symbols like '^NSEBANK', sentiment_by_sector has names like 'Banking & Financial Services'
-    # We need a mapping.
     sector_to_ticker_mapping = {
         'Banking & Financial Services': '^NSEBANK',
         'Information Technology': '^CNXIT',
@@ -61,7 +83,6 @@ def generate_and_store_insights(news_collection, market_data_collection, insight
         'Real Estate': '^CNXREALTY'
     }
 
-    # Invert the mapping to go from ticker to sector name for merging
     ticker_to_sector_mapping = {v: k for k, v in sector_to_ticker_mapping.items()}
 
     market_df['sector'] = market_df['symbol'].map(ticker_to_sector_mapping)
@@ -102,7 +123,6 @@ def generate_and_store_insights(news_collection, market_data_collection, insight
     inserted_count = 0
     if records_to_insert:
         try:
-            # Insert all documents in one go for efficiency
             insights_collection.insert_many(records_to_insert)
             inserted_count = len(records_to_insert)
             print(f"Successfully inserted {inserted_count} insight records.")
@@ -120,7 +140,6 @@ if __name__ == '__main__':
     print("NOTE: This requires 'news_articles' and 'historical_market_data' collections to be pre-populated.")
 
 
-    # We will define a mock connection function here for standalone testing
     def mock_connect_to_db(db_name, collection_name):
         try:
             client = pymongo.MongoClient("mongodb://localhost:27017/")
@@ -135,7 +154,8 @@ if __name__ == '__main__':
     mongo_market_data_collection_test = mock_connect_to_db("indian_market_scanner_db", "historical_market_data")
     mongo_insights_collection_test = mock_connect_to_db("indian_market_scanner_db", "insights")
 
-    if mongo_news_collection_test and mongo_market_data_collection_test and mongo_insights_collection_test:
+    # FIX: Check against None instead of bool()
+    if mongo_news_collection_test is not None and mongo_market_data_collection_test is not None and mongo_insights_collection_test is not None:
         total_insights_generated = generate_and_store_insights(
             mongo_news_collection_test,
             mongo_market_data_collection_test,
