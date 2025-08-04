@@ -1,10 +1,9 @@
 # database_manager.py
 
 # --- All Imports at the Top ---
-import requests  # Still needed for Finnhub/Marketaux
+import requests
 import time
 import re
-# FIX: Consistent import of datetime and date classes
 from datetime import datetime as dt_class, date as date_class, timedelta
 import pymongo
 from pymongo.errors import ConnectionFailure, DuplicateKeyError
@@ -14,18 +13,11 @@ from dotenv import load_dotenv
 
 from nlp_processor import process_and_update_sentiment, process_and_update_entities
 
-
-from market_data_collector import connect_to_market_data_mongodb, fetch_historical_market_data
-
-# NEW: Import insights generation function from insights_generator.py
-from insights_generator import connect_to_insights_mongodb, generate_and_store_insights
-
-
-# NEW: Import market data functions from market_data_collector.py
 from market_data_collector import connect_to_market_data_mongodb, fetch_historical_market_data
 
 # NEW: Import ET scraping function from et_news_scraper.py
-from et_news_scraper import scrape_economic_times_headlines  # Only need to import the main function
+# FIX: Also import necessary functions from et_news_scraper to avoid name errors in calls
+from et_news_scraper import scrape_economic_times_headlines, get_latest_news_date, insert_article_into_mongodb
 
 # --- Load Environment Variables ---
 load_dotenv()
@@ -40,95 +32,9 @@ MARKETAUX_NEWS_BASE_URL = 'https://api.marketaux.com/v1/news/all'
 
 
 # --- Helper Functions for Caching/Smart Fetching (for news APIs) ---
-# This remains in database_manager.py as it's general for news sources (ET, Finnhub, Marketaux)
-def get_latest_news_date(mongo_collection, source_name):
-    """
-    Retrieves the latest publication_date for a given source from MongoDB.
-    Returns datetime object or None if no data found.
-    """
-    if mongo_collection is None:
-        return None
-
-    latest_article = mongo_collection.find(
-        {"source": source_name, "publication_date": {"$ne": None}}
-    ).sort("publication_date", pymongo.DESCENDING).limit(1)
-
-    try:
-        latest = latest_article.next()
-        # FIX: Use dt_class explicitly
-        if isinstance(latest.get('publication_date'), dt_class):
-            return latest['publication_date']
-        elif isinstance(latest.get('publication_date'), str):
-            try:
-                # FIX: Use dt_class.strptime
-                return dt_class.strptime(latest['publication_date'], '%Y-%m-%d')
-            except ValueError:
-                return None
-        return None
-    except StopIteration:
-        return None
-
-
-# --- MongoDB Insertion Function (Core DB utility) ---
-def insert_article_into_mongodb(collection, article_data):
-    """
-    Inserts a single news article document into the MongoDB collection.
-    Uses update_one with upsert=True to insert if not exists, or update if exists.
-    """
-    if collection is None:
-        print("MongoDB collection not available. Skipping insertion.")
-        return False
-
-    # FIX: Use dt_class.strptime for parsing dates if they come as strings
-    if 'date' in article_data and isinstance(article_data['date'], str):
-        try:
-            parsed_date = dt_class.strptime(article_data['date'], '%Y-%m-%d')
-            article_data['publication_date'] = parsed_date
-        except ValueError:
-            print(f"Warning: Could not parse date '{article_data['date']}' into datetime object. Storing as string.")
-            article_data['publication_date'] = article_data['date']
-        article_data.pop('date', None)
-
-    article_data.setdefault('sentiment_score', None)
-    article_data.setdefault('companies_mentioned', [])
-    article_data.setdefault('sectors_mentioned', [])
-
-    try:
-        result = collection.update_one(
-            {'url': article_data['url']},
-            {
-                '$set': {
-                    'title': article_data.get('title'),
-                    'content': article_data.get('content'),
-                    'publication_date': article_data.get('publication_date'),
-                    'source': article_data.get('source'),
-                    'sentiment_score': article_data.get('sentiment_score'),
-                    'companies_mentioned': article_data.get('companies_mentioned'),
-                    'sectors_mentioned': article_data.get('sectors_mentioned')
-                }
-            },
-            upsert=True
-        )
-
-        if result.upserted_id:
-            print(f"Inserted new article: {article_data['title'][:50]}... (ID: {result.upserted_id})")
-            return True
-        elif result.matched_count > 0 and result.modified_count == 0:
-            print(f"Article already exists (URL: {article_data['url']}). No new insert or update needed.")
-            return False
-        elif result.matched_count > 0 and result.modified_count > 0:
-            print(f"Existing article (URL: {article_data['url']}) updated.")
-            return True
-        else:
-            print(f"MongoDB operation for URL {article_data['url']} neither inserted nor updated. Check logic.")
-            return False
-
-    except DuplicateKeyError:
-        print(f"Duplicate key error for URL: {article_data['url']}. Article already exists.")
-        return False
-    except Exception as e:
-        print(f"Error inserting/updating article {article_data.get('url', 'N/A')}: {e}")
-        return False
+# FIX: The get_latest_news_date function is no longer needed here as it's now in et_news_scraper.py
+# FIX: The insert_article_into_mongodb function is no longer needed here as it's now in et_news_scraper.py
+# So these helper functions are removed from this file.
 
 
 # --- News API Fetching Functions ---
@@ -142,19 +48,16 @@ def fetch_news_from_finnhub(api_key, mongo_collection, num_articles_limit=15):
         print("MongoDB collection not available for Finnhub news. Aborting.")
         return []
 
+    # FIX: Now call get_latest_news_date from et_news_scraper.py
     latest_finnhub_date_in_db = get_latest_news_date(mongo_collection, "Finnhub")
-    # FIX: Use dt_class.strftime and dt_class.now()
-    from_date_str = (latest_finnhub_date_in_db + timedelta(days=1)).strftime(
-        '%Y-%m-%d') if latest_finnhub_date_in_db else None
+    from_date_str = (latest_finnhub_date_in_db + timedelta(days=1)).strftime('%Y-%m-%d') if latest_finnhub_date_in_db else None
     to_date_str = dt_class.now().strftime('%Y-%m-%d')
 
     if latest_finnhub_date_in_db:
-        print(
-            f"Latest Finnhub article in DB is from: {latest_finnhub_date_in_db.strftime('%Y-%m-%d')}. Fetching newer news.")
+        print(f"Latest Finnhub article in DB is from: {latest_finnhub_date_in_db.strftime('%Y-%m-%d')}. Fetching newer news.")
     else:
         print("No Finnhub articles found in DB. Fetching recent news.")
 
-    # FIX: Use dt_class.strptime and dt_class.now()
     if from_date_str and dt_class.strptime(from_date_str, '%Y-%m-%d').date() > dt_class.now().date():
         print(f"Skipping Finnhub fetch: From date {from_date_str} is in the future.")
         return []
@@ -170,7 +73,6 @@ def fetch_news_from_finnhub(api_key, mongo_collection, num_articles_limit=15):
         params = {
             'category': category,
             'token': api_key,
-            # FIX: Use dt_class.now()
             'from': from_date_str if from_date_str else (dt_class.now() - timedelta(days=7)).strftime('%Y-%m-%d'),
             'to': to_date_str
         }
@@ -201,7 +103,6 @@ def fetch_news_from_finnhub(api_key, mongo_collection, num_articles_limit=15):
                     'title': item.get('headline'),
                     'content': item.get('summary'),
                     'url': item.get('url'),
-                    # FIX: Use dt_class.fromtimestamp
                     'publication_date': dt_class.fromtimestamp(item.get('datetime', 0)).strftime('%Y-%m-%d'),
                     'source': "Finnhub",
                     'sentiment_score': None,
@@ -214,6 +115,7 @@ def fetch_news_from_finnhub(api_key, mongo_collection, num_articles_limit=15):
                         f"Skipping article due to missing crucial data from Finnhub: {article_data.get('url', 'N/A')}")
                     continue
 
+                # FIX: Call the insert_article_into_mongodb function defined in this file
                 inserted = insert_article_into_mongodb(mongo_collection, article_data)
                 if inserted:
                     all_fetched_articles.append(article_data)
@@ -226,8 +128,7 @@ def fetch_news_from_finnhub(api_key, mongo_collection, num_articles_limit=15):
             time.sleep(0.5)
 
         except requests.exceptions.RequestException as e:
-            error_response_content = response.text[:200] if response is not None and hasattr(response,
-                                                                                             'text') else 'N/A'
+            error_response_content = response.text[:200] if response is not None and hasattr(response, 'text') else 'N/A'
             print(f"Error fetching news from Finnhub API for category '{category}': {e}")
             print(f"Response content: {error_response_content}")
         except Exception as e:
@@ -248,10 +149,10 @@ def fetch_news_from_marketaux(api_key, mongo_collection, num_articles_limit=15):
         print("MongoDB collection not available for Marketaux news. Aborting.")
         return []
 
+    # FIX: Now call get_latest_news_date from this file
     latest_marketaux_date_in_db = get_latest_news_date(mongo_collection, "Marketaux")
-    # FIX: Use dt_class and timedelta.isoformat()
     published_after_date_str = (
-            latest_marketaux_date_in_db + timedelta(days=1)).isoformat() if latest_marketaux_date_in_db else None
+                latest_marketaux_date_in_db + timedelta(days=1)).isoformat() if latest_marketaux_date_in_db else None
 
     if latest_marketaux_date_in_db:
         print(
@@ -259,7 +160,6 @@ def fetch_news_from_marketaux(api_key, mongo_collection, num_articles_limit=15):
     else:
         print("No Marketaux articles found in DB. Fetching recent news.")
 
-    # FIX: Use dt_class.fromisoformat and dt_class.now()
     if published_after_date_str and dt_class.fromisoformat(
             published_after_date_str.replace('Z', '+00:00')).date() > dt_class.now().date():
         print(f"Skipping Marketaux fetch: Published after date {published_after_date_str} is in the future.")
@@ -277,7 +177,6 @@ def fetch_news_from_marketaux(api_key, mongo_collection, num_articles_limit=15):
     }
 
     if not published_after_date_str:
-        # FIX: Use dt_class.now()
         params['published_after'] = (dt_class.now() - timedelta(days=7)).isoformat()
 
     response = None
@@ -297,7 +196,6 @@ def fetch_news_from_marketaux(api_key, mongo_collection, num_articles_limit=15):
             published_date_str = None
             if item.get('published_at'):
                 try:
-                    # FIX: Use dt_class.fromisoformat
                     dt_object = dt_class.fromisoformat(item['published_at'].replace('Z', '+00:00'))
                     published_date_str = dt_object.strftime('%Y-%m-%d')
                 except ValueError:
@@ -319,6 +217,7 @@ def fetch_news_from_marketaux(api_key, mongo_collection, num_articles_limit=15):
                 print(f"Skipping article due to missing crucial data from Marketaux: {article_data.get('url', 'N/A')}")
                 continue
 
+            # FIX: Call the insert_article_into_mongodb function defined in this file
             inserted = insert_article_into_mongodb(mongo_collection, article_data)
             if inserted:
                 all_fetched_articles.append(article_data)
@@ -431,8 +330,12 @@ def insert_article_into_mongodb(collection, article_data):
 if __name__ == "__main__":
     print("Starting news and market data processing pipeline...")
 
-    if not os.getenv('FINNHUB_API_KEY') or not os.getenv('MARKETAUX_API_KEY'):
-        print("Error: API keys not found in .env file.")
+    # --- API Key Checks ---
+    if not FINNHUB_API_KEY:
+        print("Error: FINNHUB_API_KEY not found in .env file or environment variables.")
+        exit(1)
+    if not MARKETAUX_API_KEY:
+        print("Error: MARKETAUX_API_KEY not found in .env file or environment variables.")
         exit(1)
 
     # --- MongoDB Connections ---
@@ -440,20 +343,15 @@ if __name__ == "__main__":
     mongo_market_data_collection = connect_to_market_data_mongodb(db_name='indian_market_scanner_db',
                                                                   collection_name='historical_market_data')
 
-    # NEW: Connect to the insights collection
-    mongo_insights_collection = connect_to_insights_mongodb(db_name='indian_market_scanner_db',
-                                                            collection_name='insights')
-
-    if mongo_news_collection is not None and mongo_market_data_collection is not None and mongo_insights_collection is not None:
+    if mongo_news_collection is not None and mongo_market_data_collection is not None:
         print("\nAll MongoDB connections established. Proceeding with data collection and processing.")
 
         # --- Phase 1 & 2: Data Collection ---
-        # ... (Calls to ET scraper, Finnhub, Marketaux all remain the same) ...
         print("\n--- Phase 1 & 2: Data Collection via Economic Times Scraper ---")
+        # Pass the helper functions to the ET scraper
         et_scraped_summary = scrape_economic_times_headlines(
             num_articles_limit=15,
-            get_latest_news_date_func=get_latest_news_date,
-            insert_article_func=insert_article_into_mongodb
+            mongo_collection=mongo_news_collection
         )
         if et_scraped_summary:
             print(f"\nEconomic Times scraping complete. Processed {len(et_scraped_summary)} articles.")
@@ -462,7 +360,7 @@ if __name__ == "__main__":
 
         print("\n--- Phase 1 & 2: Data Collection via Finnhub API ---")
         finnhub_news_summary = fetch_news_from_finnhub(
-            api_key=os.getenv('FINNHUB_API_KEY'),
+            api_key=FINNHUB_API_KEY,
             mongo_collection=mongo_news_collection,
             num_articles_limit=20
         )
@@ -473,7 +371,7 @@ if __name__ == "__main__":
 
         print("\n--- Phase 1 & 2: Data Collection via Marketaux API ---")
         marketaux_news_summary = fetch_news_from_marketaux(
-            api_key=os.getenv('MARKETAUX_API_KEY'),
+            api_key=MARKETAUX_API_KEY,
             mongo_collection=mongo_news_collection,
             num_articles_limit=20
         )
@@ -491,8 +389,14 @@ if __name__ == "__main__":
 
         # --- Phase 4: Historical Market Data ---
         nifty_index_tickers = [
-            '^NSEI', '^NSEBANK', '^CNXIT', '^CNXAUTO',
-            '^CNXFMCG', '^CNXMETAL', '^CNXMEDIA', '^CNXREALTY'
+            '^NSEI',
+            '^NSEBANK',
+            '^CNXIT',
+            '^CNXAUTO',
+            '^CNXFMCG',
+            '^CNXMETAL',
+            '^CNXMEDIA',
+            '^CNXREALTY',
         ]
 
         today_date = dt_class.now()
@@ -510,18 +414,13 @@ if __name__ == "__main__":
         else:
             print("\nNo new market data records collected or an error occurred.")
 
-        # --- NEW: Phase 5: Generating and Storing Insights ---
-        generate_and_store_insights(
-            mongo_news_collection,
-            mongo_market_data_collection
-        )
-
     else:
         print("\nFailed to connect to MongoDB. All processing aborted.")
 
     print("\nProject execution complete. Check your MongoDB for:")
     print("  - News Articles (indian_market_scanner_db -> news_articles)")
     print("  - Historical Market Data (indian_market_scanner_db -> historical_market_data)")
-    print("  - New Insights (indian_market_scanner_db -> insights)")
     print(
-        "\nExample mongosh query for insights: `use indian_market_scanner_db; db.insights.find().sort({'date': -1}).limit(5).pretty()`")
+        "\nExample mongosh query for news: `use indian_market_scanner_db; db.news_articles.find({'sentiment_score': {'$ne': null}}).limit(1).pretty()`")
+    print(
+        "Example mongosh query for market data: `use indian_market_scanner_db; db.historical_market_data.find({'symbol': '^NSEI'}).sort({'date': -1}).limit(5).pretty()`")
