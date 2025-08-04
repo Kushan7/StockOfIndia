@@ -4,14 +4,14 @@ import requests
 from bs4 import BeautifulSoup
 import time
 import re
-from datetime import datetime
-import pymongo # Needed for the mock DB in the test block
+from datetime import datetime as dt_class, date as date_class, timedelta
+import pymongo
+from pymongo.errors import ConnectionFailure, DuplicateKeyError
 
-# Import helper functions from the main database manager file
+# Import core MongoDB insertion utility from the main file
 from database_manager import get_latest_news_date, insert_article_into_mongodb
 
 
-# --- Web Scraping Helper Functions (Specific to ET structure) ---
 def get_html_content(url, retries=3, delay=2):
     """
     Fetches the HTML content of a given URL with retries and delays.
@@ -34,10 +34,10 @@ def get_html_content(url, retries=3, delay=2):
                 return None
     return None
 
+
 def parse_article_page(article_url):
     """
     Parses a single Economic Times article page to extract title, date, and content.
-    The final strategy for ET is to only extract metadata.
     """
     print(f"Scraping article content: {article_url}")
     html_content = get_html_content(article_url)
@@ -77,12 +77,10 @@ def parse_article_page(article_url):
             if match:
                 date = match.group(0)
 
-    # --- FINAL STRATEGY FOR ET: ONLY EXTRACT METADATA ---
-    # Content is deliberately left empty to avoid scraping issues
     return {
         'title': title,
         'date': date,
-        'content': "",  # Leave content empty to avoid pollution
+        'content': "",
         'url': article_url,
         'source': 'Economic Times'
     }
@@ -91,16 +89,12 @@ def parse_article_page(article_url):
 def scrape_economic_times_headlines(mongo_collection, num_articles_limit=10):
     """
     Scrapes headlines and article URLs from Economic Times listing pages
-    and optionally inserts them into the provided MongoDB collection.
-    It will only fetch metadata (title, URL, date) for ET articles.
+    and inserts them into the provided MongoDB collection.
     """
-    if mongo_collection is None:
-        print("Error: DB collection not provided. Aborting ET scraper.")
-        return []
-
     all_articles_data = []
     seen_urls = set()
 
+    # Call the imported helper functions
     latest_et_date_in_db = get_latest_news_date(mongo_collection, "Economic Times")
     if latest_et_date_in_db:
         print(
@@ -146,7 +140,7 @@ def scrape_economic_times_headlines(mongo_collection, num_articles_limit=10):
                 article_date_obj = None
 
                 try:
-                    parsed_date_obj = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+                    parsed_date_obj = dt_class.fromisoformat(date_str.replace('Z', '+00:00'))
                     formatted_date_str = parsed_date_obj.strftime('%Y-%m-%d')
                     article_date_obj = parsed_date_obj
                 except ValueError:
@@ -156,7 +150,7 @@ def scrape_economic_times_headlines(mongo_collection, num_articles_limit=10):
                     if match:
                         formatted_date_str = match.group(0)
                         try:
-                            article_date_obj = datetime.strptime(formatted_date_str, '%b %d, %Y')
+                            article_date_obj = dt_class.strptime(formatted_date_str, '%b %d, %Y')
                         except ValueError:
                             pass
                     else:
@@ -165,7 +159,7 @@ def scrape_economic_times_headlines(mongo_collection, num_articles_limit=10):
                         if match:
                             formatted_date_str = match.group(0)
                             try:
-                                article_date_obj = datetime.strptime(formatted_date_str, '%d %b %Y')
+                                article_date_obj = dt_class.strptime(formatted_date_str, '%d %b %Y')
                             except ValueError:
                                 pass
                         else:
@@ -182,18 +176,10 @@ def scrape_economic_times_headlines(mongo_collection, num_articles_limit=10):
                 if "/articleshow/" in article_url and "economictimes.indiatimes.com" in article_url and article_url not in seen_urls:
                     print(f"Attempting to process article: {article_url}")
 
-                    article_details = {
-                        'title': title,
-                        'date': formatted_date_str,
-                        'content': "",
-                        'url': article_url,
-                        'source': 'Economic Times',
-                        'sentiment_score': None,
-                        'companies_mentioned': [],
-                        'sectors_mentioned': []
-                    }
+                    # Since ET scraping is for metadata only, we can simplify this even more
+                    article_details = parse_article_page(article_url)
 
-                    if article_details['title'] and article_details['url']:
+                    if article_details and article_details['title'] and article_details['url']:
                         inserted_successfully = insert_article_into_mongodb(mongo_collection, article_details)
                         if inserted_successfully:
                             all_articles_data.append(article_details)
@@ -213,3 +199,5 @@ def scrape_economic_times_headlines(mongo_collection, num_articles_limit=10):
             break
 
     return all_articles_data
+
+# --- Main Execution Block (removed from here, will be in database_manager.py) ---
