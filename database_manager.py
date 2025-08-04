@@ -314,7 +314,7 @@ def fetch_news_from_marketaux(api_key, mongo_collection, num_articles_limit=15):
         print(f"Error fetching news from Marketaux API: {e}")
         print(f"Response content: {error_response_content}")
     except Exception as e:
-        print(f"An unexpected error occurred processing Marketaux news for category '{category}': {e}")
+        print(f"An unexpected error occurred processing Marketaux news for category '{}': {e}")
 
     print(f"Marketaux news collection complete. Inserted {processed_count} new/updated articles.")
     return all_fetched_articles
