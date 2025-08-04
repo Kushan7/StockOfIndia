@@ -8,10 +8,95 @@ from datetime import datetime as dt_class, date as date_class, timedelta
 import pymongo
 from pymongo.errors import ConnectionFailure, DuplicateKeyError
 
-# Import core MongoDB insertion utility from the main file
-from database_manager import get_latest_news_date, insert_article_into_mongodb
+
+# --- Helper Functions for Caching/Insertion (Local to this file) ---
+def get_latest_news_date(mongo_collection, source_name):
+    """
+    Retrieves the latest publication_date for a given source from MongoDB.
+    Returns datetime object or None if no data found.
+    """
+    if mongo_collection is None:
+        return None
+
+    latest_article = mongo_collection.find(
+        {"source": source_name, "publication_date": {"$ne": None}}
+    ).sort("publication_date", pymongo.DESCENDING).limit(1)
+
+    try:
+        latest = latest_article.next()
+        if isinstance(latest.get('publication_date'), dt_class):
+            return latest['publication_date']
+        elif isinstance(latest.get('publication_date'), str):
+            try:
+                return dt_class.strptime(latest['publication_date'], '%Y-%m-%d')
+            except ValueError:
+                return None
+        return None
+    except StopIteration:
+        return None
 
 
+def insert_article_into_mongodb(collection, article_data):
+    """
+    Inserts a single news article document into the MongoDB collection.
+    Uses update_one with upsert=True to insert if not exists, or update if exists.
+    """
+    if collection is None:
+        print("MongoDB collection not available. Skipping insertion.")
+        return False
+
+    if 'date' in article_data and isinstance(article_data['date'], str):
+        try:
+            parsed_date = dt_class.strptime(article_data['date'], '%Y-%m-%d')
+            article_data['publication_date'] = parsed_date
+        except ValueError:
+            print(f"Warning: Could not parse date '{article_data['date']}' into datetime object. Storing as string.")
+            article_data['publication_date'] = article_data['date']
+        article_data.pop('date', None)
+
+    article_data.setdefault('sentiment_score', None)
+    article_data.setdefault('companies_mentioned', [])
+    article_data.setdefault('sectors_mentioned', [])
+
+    try:
+        result = collection.update_one(
+            {'url': article_data['url']},
+            {
+                '$set': {
+                    'title': article_data.get('title'),
+                    'content': article_data.get('content'),
+                    'publication_date': article_data.get('publication_date'),
+                    'source': article_data.get('source'),
+                    'sentiment_score': article_data.get('sentiment_score'),
+                    'companies_mentioned': article_data.get('companies_mentioned'),
+                    'sectors_mentioned': article_data.get('sectors_mentioned')
+                }
+            },
+            upsert=True
+        )
+
+        if result.upserted_id:
+            print(f"Inserted new article: {article_data['title'][:50]}... (ID: {result.upserted_id})")
+            return True
+        elif result.matched_count > 0 and result.modified_count == 0:
+            print(f"Article already exists (URL: {article_data['url']}). No new insert or update needed.")
+            return False
+        elif result.matched_count > 0 and result.modified_count > 0:
+            print(f"Existing article (URL: {article_data['url']}) updated.")
+            return True
+        else:
+            print(f"MongoDB operation for URL {article_data['url']} neither inserted nor updated. Check logic.")
+            return False
+
+    except DuplicateKeyError:
+        print(f"Duplicate key error for URL: {article_data['url']}. Article already exists.")
+        return False
+    except Exception as e:
+        print(f"Error inserting/updating article {article_data.get('url', 'N/A')}: {e}")
+        return False
+
+
+# --- Web Scraping Helper Functions (Specific to ET structure) ---
 def get_html_content(url, retries=3, delay=2):
     """
     Fetches the HTML content of a given URL with retries and delays.
@@ -77,6 +162,7 @@ def parse_article_page(article_url):
             if match:
                 date = match.group(0)
 
+    # --- FINAL STRATEGY FOR ET: ONLY EXTRACT METADATA ---
     return {
         'title': title,
         'date': date,
@@ -90,11 +176,15 @@ def scrape_economic_times_headlines(mongo_collection, num_articles_limit=10):
     """
     Scrapes headlines and article URLs from Economic Times listing pages
     and inserts them into the provided MongoDB collection.
+    It will only fetch metadata (title, URL, date) for ET articles.
     """
+    if mongo_collection is None:
+        print("Error: DB collection not provided. Aborting ET scraper.")
+        return []
+
     all_articles_data = []
     seen_urls = set()
 
-    # Call the imported helper functions
     latest_et_date_in_db = get_latest_news_date(mongo_collection, "Economic Times")
     if latest_et_date_in_db:
         print(
@@ -176,10 +266,13 @@ def scrape_economic_times_headlines(mongo_collection, num_articles_limit=10):
                 if "/articleshow/" in article_url and "economictimes.indiatimes.com" in article_url and article_url not in seen_urls:
                     print(f"Attempting to process article: {article_url}")
 
-                    # Since ET scraping is for metadata only, we can simplify this even more
                     article_details = parse_article_page(article_url)
 
-                    if article_details and article_details['title'] and article_details['url']:
+                    if article_details:
+                        article_details['title'] = title
+                        article_details['date'] = formatted_date_str
+                        article_details['source'] = "Economic Times"
+
                         inserted_successfully = insert_article_into_mongodb(mongo_collection, article_details)
                         if inserted_successfully:
                             all_articles_data.append(article_details)
@@ -187,6 +280,7 @@ def scrape_economic_times_headlines(mongo_collection, num_articles_limit=10):
                             all_articles_data.append(article_details)
                     else:
                         print(f"Warning: Missing title or URL for article: {article_url}. Skipping.")
+                        continue  # Skip to next article if metadata extraction failed
 
                     seen_urls.add(article_url)
                     time.sleep(1.5)
@@ -199,5 +293,3 @@ def scrape_economic_times_headlines(mongo_collection, num_articles_limit=10):
             break
 
     return all_articles_data
-
-# --- Main Execution Block (removed from here, will be in database_manager.py) ---
