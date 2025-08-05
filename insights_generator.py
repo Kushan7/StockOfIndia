@@ -1,15 +1,13 @@
 # insights_generator.py
 
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime as dt_class, date as date_class, timedelta
 import pymongo
 import numpy as np
 
 from pymongo.errors import InvalidDocument
 
 
-# We'll need a MongoDB connection function to run this independently,
-# but when called from database_manager.py, we'll pass the collection objects.
 def connect_to_insights_mongodb(host='localhost', port=27017, db_name='indian_market_scanner_db',
                                 collection_name='insights'):
     """
@@ -43,11 +41,12 @@ def generate_and_store_insights(news_collection, market_data_collection, insight
 
     # 1. Fetch data from MongoDB
     print("Fetching news articles and market data from MongoDB...")
+    # NOTE: The '_id' column can cause issues with .explode. We'll drop it after initial fetch.
     news_data = list(news_collection.find({'sentiment_score': {'$ne': None}}))
     market_data = list(market_data_collection.find())
 
-    news_df = pd.DataFrame(news_data)
-    market_df = pd.DataFrame(market_data)
+    news_df = pd.DataFrame(news_data).drop(columns=['_id'])
+    market_df = pd.DataFrame(market_data).drop(columns=['_id'])
 
     if news_df.empty or market_df.empty:
         print("Not enough data to generate insights. Please run the data collectors first.")
@@ -55,7 +54,8 @@ def generate_and_store_insights(news_collection, market_data_collection, insight
 
     # Clean up dataframes
     news_df['publication_date'] = pd.to_datetime(news_df['publication_date']).dt.date
-    market_df['date'] = pd.to_datetime(market_df['date'])
+    # The market_df's date is already a datetime.date object from the market_data_collector
+    market_df['date'] = pd.to_datetime(market_df['date']).dt.date
 
     # 2. Aggregate sentiment by sector and date
     print("Aggregating sentiment by sector and date...")
@@ -101,14 +101,14 @@ def generate_and_store_insights(news_collection, market_data_collection, insight
     # 4. Calculate market trends (SMAs)
     print("Calculating market trends and signals...")
     insights_df.sort_values(['sector', 'date'], inplace=True)
-    insights_df['sma_20'] = insights_df.groupby('sector')['Close'].transform(lambda x: x.rolling(window=20).mean())
-    insights_df['sma_50'] = insights_df.groupby('sector')['Close'].transform(lambda x: x.rolling(window=50).mean())
+    insights_df['sma_20'] = insights_df.groupby('sector')['close'].transform(lambda x: x.rolling(window=20).mean())
+    insights_df['sma_50'] = insights_df.groupby('sector')['close'].transform(lambda x: x.rolling(window=50).mean())
 
     # 5. Generate signals
     def generate_signal(row):
-        if row['avg_sentiment'] > 0.65 and row['Close'] > row['sma_20'] and row['sma_20'] > row['sma_50']:
+        if row['avg_sentiment'] > 0.65 and row['close'] > row['sma_20'] and row['sma_20'] > row['sma_50']:
             return 'Buy'
-        if row['avg_sentiment'] < 0.35 and row['Close'] < row['sma_20'] and row['sma_20'] < row['sma_50']:
+        if row['avg_sentiment'] < 0.35 and row['close'] < row['sma_20'] and row['sma_20'] < row['sma_50']:
             return 'Sell'
         return 'Neutral'
 
@@ -117,7 +117,12 @@ def generate_and_store_insights(news_collection, market_data_collection, insight
     # 6. Store final insights in a new collection
     print("Storing final insights in MongoDB...")
 
-    insights_collection.delete_many({})  # Drop existing insights for a clean update
+    insights_collection.delete_many({})
+
+    # --- FINAL FIX: Convert the date column to datetime.datetime before inserting ---
+    # The to_dict('records') method will now produce a list of dictionaries
+    # where the 'date' field is a datetime.datetime object, compatible with pymongo.
+    insights_df['date'] = insights_df['date'].apply(lambda x: datetime.combine(x, datetime.min.time()))
 
     records_to_insert = insights_df.to_dict('records')
     inserted_count = 0
@@ -154,7 +159,6 @@ if __name__ == '__main__':
     mongo_market_data_collection_test = mock_connect_to_db("indian_market_scanner_db", "historical_market_data")
     mongo_insights_collection_test = mock_connect_to_db("indian_market_scanner_db", "insights")
 
-    # FIX: Check against None instead of bool()
     if mongo_news_collection_test is not None and mongo_market_data_collection_test is not None and mongo_insights_collection_test is not None:
         total_insights_generated = generate_and_store_insights(
             mongo_news_collection_test,
