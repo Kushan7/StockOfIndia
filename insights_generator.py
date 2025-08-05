@@ -1,6 +1,7 @@
 # insights_generator.py
 
 import pandas as pd
+# FIX: Correct import style for datetime classes
 from datetime import datetime as dt_class, date as date_class, timedelta
 import pymongo
 import numpy as np
@@ -41,7 +42,6 @@ def generate_and_store_insights(news_collection, market_data_collection, insight
 
     # 1. Fetch data from MongoDB
     print("Fetching news articles and market data from MongoDB...")
-    # NOTE: The '_id' column can cause issues with .explode. We'll drop it after initial fetch.
     news_data = list(news_collection.find({'sentiment_score': {'$ne': None}}))
     market_data = list(market_data_collection.find())
 
@@ -54,7 +54,7 @@ def generate_and_store_insights(news_collection, market_data_collection, insight
 
     # Clean up dataframes
     news_df['publication_date'] = pd.to_datetime(news_df['publication_date']).dt.date
-    # The market_df's date is already a datetime.date object from the market_data_collector
+    # FIX: Convert market_df's date to datetime.date to match sentiment dataframe
     market_df['date'] = pd.to_datetime(market_df['date']).dt.date
 
     # 2. Aggregate sentiment by sector and date
@@ -119,10 +119,10 @@ def generate_and_store_insights(news_collection, market_data_collection, insight
 
     insights_collection.delete_many({})
 
-    # --- FINAL FIX: Convert the date column to datetime.datetime before inserting ---
+    # FIX: Convert the date column to datetime.datetime before inserting
     # The to_dict('records') method will now produce a list of dictionaries
     # where the 'date' field is a datetime.datetime object, compatible with pymongo.
-    insights_df['date'] = insights_df['date'].apply(lambda x: datetime.combine(x, datetime.min.time()))
+    insights_df['date'] = insights_df['date'].apply(lambda x: dt_class.combine(x, dt_class.min.time()))
 
     records_to_insert = insights_df.to_dict('records')
     inserted_count = 0
