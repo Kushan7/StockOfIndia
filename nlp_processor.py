@@ -10,10 +10,14 @@ finbert_tokenizer = None
 finbert_model = None
 finbert_labels = ['negative', 'neutral', 'positive']
 
+# insights_generator.py
+
+# ... (rest of the file remains the same) ...
+
 # --- Global spaCy Model Variable ---
 nlp_spacy = None
 
-# --- Sector Keywords Mapping (keep as is) ---
+# --- NEW: Expanded Sector Keywords Mapping ---
 SECTOR_KEYWORDS = {
     'bank': 'Banking & Financial Services', 'finance': 'Banking & Financial Services',
     'nbfc': 'Banking & Financial Services', 'fincorp': 'Banking & Financial Services',
@@ -38,9 +42,19 @@ SECTOR_KEYWORDS = {
     'capital goods': 'Capital Goods',
     'textile': 'Textiles',
     'logistics': 'Logistics',
-    'psu': 'Public Sector Undertakings'
+    'psu': 'Public Sector Undertakings',
+
+    # --- NEW KEYWORDS FOR COMMODITIES ---
+    'gold': 'Commodities', 'silver': 'Commodities', 'crude': 'Commodities', 'oil': 'Energy', 'gas': 'Energy',
+    'commodities': 'Commodities',
+
+    # --- NEW KEYWORDS FOR MID/SMALL CAP ---
+    'mid-cap': 'Mid & Small Cap', 'midcap': 'Mid & Small Cap',
+    'small-cap': 'Mid & Small Cap', 'smallcap': 'Mid & Small Cap'
 }
 
+
+# ... (rest of the file remains the same) ...
 
 # --- FinBERT Sentiment Analysis Functions ---
 
