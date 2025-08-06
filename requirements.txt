@@ -8,3 +8,4 @@ numpy
 dotenv
 yfinance
 lxml
+streamlit plotly
