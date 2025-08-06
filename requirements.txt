@@ -5,3 +5,6 @@ spacy
 transformers
 scipy
 numpy
+dotenv
+yfinance
+lxml
