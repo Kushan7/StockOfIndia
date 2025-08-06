@@ -233,8 +233,10 @@ def fetch_news_from_marketaux(api_key, mongo_collection, num_articles_limit=15):
         return []
 
     latest_marketaux_date_in_db = get_latest_news_date(mongo_collection, "Marketaux")
-    published_after_date_str = (
-            latest_marketaux_date_in_db + timedelta(days=1)).isoformat() if latest_marketaux_date_in_db else None
+
+    # Corrected: Use a simple YYYY-MM-DD format for the API to avoid errors.
+    published_after_date_str = (latest_marketaux_date_in_db + timedelta(days=1)).strftime(
+        '%Y-%m-%d') if latest_marketaux_date_in_db else (dt_class.now() - timedelta(days=7)).strftime('%Y-%m-%d')
 
     if latest_marketaux_date_in_db:
         print(
@@ -242,8 +244,7 @@ def fetch_news_from_marketaux(api_key, mongo_collection, num_articles_limit=15):
     else:
         print("No Marketaux articles found in DB. Fetching recent news.")
 
-    if published_after_date_str and dt_class.fromisoformat(
-            published_after_date_str.replace('Z', '+00:00')).date() > dt_class.now().date():
+    if dt_class.strptime(published_after_date_str, '%Y-%m-%d').date() > dt_class.now().date():
         print(f"Skipping Marketaux fetch: Published after date {published_after_date_str} is in the future.")
         return []
 
@@ -257,9 +258,6 @@ def fetch_news_from_marketaux(api_key, mongo_collection, num_articles_limit=15):
         'sort': 'published_desc',
         'published_after': published_after_date_str
     }
-
-    if not published_after_date_str:
-        params['published_after'] = (dt_class.now() - timedelta(days=7)).isoformat()
 
     response = None
     try:
@@ -315,7 +313,7 @@ def fetch_news_from_marketaux(api_key, mongo_collection, num_articles_limit=15):
         print(f"Error fetching news from Marketaux API: {e}")
         print(f"Response content: {error_response_content}")
     except Exception as e:
-        print(f"An unexpected error occurred processing Marketaux news for category '{category}': {e}")
+        print(f"An unexpected error occurred processing Marketaux news: {e}")
 
     print(f"Marketaux news collection complete. Inserted {processed_count} new/updated articles.")
     return all_fetched_articles
