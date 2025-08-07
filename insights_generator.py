@@ -110,8 +110,9 @@ def generate_and_store_insights(news_collection, market_data_collection, insight
     sentiment_by_sector.rename(columns={'publication_date': 'date', 'sectors_mentioned': 'sector'}, inplace=True)
     sentiment_by_sector['date'] = pd.to_datetime(sentiment_by_sector['date'])
 
-    # 3. Join sentiment with market data
-    print("Joining sentiment data with market data...")
+    # 3. Create a full time series from market data first
+    print("Creating a full time series and calculating trends...")
+
     sector_to_ticker_mapping = {
         'Banking & Financial Services': '^NSEBANK',
         'Information Technology': '^CNXIT',
@@ -126,30 +127,35 @@ def generate_and_store_insights(news_collection, market_data_collection, insight
     ticker_to_sector_mapping = {v: k for k, v in sector_to_ticker_mapping.items()}
 
     market_df['sector'] = market_df['symbol'].map(ticker_to_sector_mapping)
+    market_df.sort_values(['sector', 'date'], inplace=True)
 
+    # Calculate SMAs on the full historical market data
+    market_df['sma_20'] = market_df.groupby('sector')['close'].transform(lambda x: x.rolling(window=20).mean())
+    market_df['sma_50'] = market_df.groupby('sector')['close'].transform(lambda x: x.rolling(window=50).mean())
+
+    # Calculate Beta and map it to the DataFrame
+    betas = calculate_beta(market_df)
+    market_df['beta'] = market_df['symbol'].map(betas)
+
+    # Calculate a price to SMA(50) ratio
+    market_df['price_to_sma_50_ratio'] = market_df['close'] / market_df['sma_50']
+
+    # 4. Perform a LEFT JOIN with the sentiment data
+    print("Joining sentiment data with full market data...")
     insights_df = pd.merge(
-        sentiment_by_sector,
         market_df,
+        sentiment_by_sector,
         on=['date', 'sector'],
-        how='inner'
+        how='left'
     )
+
+    # Fill NaN values for days with no news
+    insights_df['avg_sentiment'].fillna(0.5, inplace=True)
+    insights_df['num_articles'].fillna(0, inplace=True)
 
     if insights_df.empty:
         print("No matching news and market data found for the same date/sector. Aborting.")
         return 0
-
-    # 4. Calculate market trends (SMAs), Beta, and a P/B proxy
-    print("Calculating market trends and new metrics...")
-    insights_df.sort_values(['sector', 'date'], inplace=True)
-    insights_df['sma_20'] = insights_df.groupby('sector')['close'].transform(lambda x: x.rolling(window=20).mean())
-    insights_df['sma_50'] = insights_df.groupby('sector')['close'].transform(lambda x: x.rolling(window=50).mean())
-
-    # New: Calculate Beta and map it to the DataFrame
-    betas = calculate_beta(market_df)
-    insights_df['beta'] = insights_df['symbol'].map(betas)
-
-    # NEW: A more reliable long-term value metric proxy
-    insights_df['price_to_sma_50_ratio'] = insights_df['close'] / insights_df['sma_50']
 
     # 5. Generate signals
     def generate_signal(row):
