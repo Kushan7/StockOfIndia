@@ -1,7 +1,7 @@
 # insights_generator.py
 
 import pandas as pd
-from datetime import datetime, timedelta, date as date_class
+from datetime import datetime, timedelta
 import pymongo
 import numpy as np
 
@@ -59,7 +59,7 @@ def calculate_beta(market_df):
             covariance = merged_df['sector_return'].cov(merged_df['nifty_return'])
             variance = merged_df['nifty_return'].var()
 
-            if variance != 0:
+            if variance != 0 and not pd.isna(covariance) and not pd.isna(variance):
                 beta = covariance / variance
                 betas[symbol] = beta
             else:
@@ -138,7 +138,7 @@ def generate_and_store_insights(news_collection, market_data_collection, insight
         print("No matching news and market data found for the same date/sector. Aborting.")
         return 0
 
-    # 4. Calculate market trends (SMAs) and Beta
+    # 4. Calculate market trends (SMAs), Beta, and a P/B proxy
     print("Calculating market trends and new metrics...")
     insights_df.sort_values(['sector', 'date'], inplace=True)
     insights_df['sma_20'] = insights_df.groupby('sector')['close'].transform(lambda x: x.rolling(window=20).mean())
@@ -148,16 +148,14 @@ def generate_and_store_insights(news_collection, market_data_collection, insight
     betas = calculate_beta(market_df)
     insights_df['beta'] = insights_df['symbol'].map(betas)
 
-    # New: Calculate a simplified P/B ratio (for demonstrative purposes)
-    # This is a conceptual example for an index, not a true calculation
-    insights_df['pb_ratio'] = insights_df['close'] / insights_df.groupby('sector')['close'].transform(
-        lambda x: x.rolling(window=20).mean())
+    # NEW: A more reliable long-term value metric proxy
+    insights_df['price_to_sma_50_ratio'] = insights_df['close'] / insights_df['sma_50']
 
     # 5. Generate signals
     def generate_signal(row):
         is_long_term_buy = (
                 row['beta'] < 1.05 and  # Lower beta suggests less volatility
-                row['pb_ratio'] < 0.95  # P/B below 1 suggests undervalued (in this simple model)
+                row['price_to_sma_50_ratio'] < 0.95  # Below 1 suggests undervaluation
         )
         is_bullish_trend = (
                 row['avg_sentiment'] > 0.65 and
