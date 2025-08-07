@@ -368,6 +368,7 @@ if __name__ == "__main__":
     mongo_news_collection = connect_to_mongodb(db_name='indian_market_scanner_db', collection_name='news_articles')
     mongo_market_data_collection = connect_to_market_data_mongodb(db_name='indian_market_scanner_db',
                                                                   collection_name='historical_market_data')
+    mongo_insights_collection = None # Initialize to None
 
     if mongo_news_collection is not None and mongo_market_data_collection is not None:
         print("\nAll MongoDB connections established. Proceeding with data collection and processing.")
@@ -411,21 +412,22 @@ if __name__ == "__main__":
         process_and_update_entities(mongo_news_collection)
 
         print("\n--- Phase 4: Historical Market Data ---")
-        total_market_data_records = fetch_historical_market_data(
+        fetch_historical_market_data(
             mongo_collection=mongo_market_data_collection
         )
-        if total_market_data_records > 0:
-            print(f"\nSuccessfully collected {total_market_data_records} new/updated market data records.")
-        else:
-            print("\nNo new market data records collected or an error occurred.")
+        # The fetch_historical_market_data function now prints its own summary
+        print("\nSuccessfully collected historical market data records.")
 
         print("\n--- Phase 5: Generating Correlation and Insights ---")
-        mongo_insights_collection = pymongo.MongoClient("mongodb://localhost:27017/")["indian_market_scanner_db"]["insights"]
-        generate_and_store_insights(
-            mongo_news_collection=mongo_news_collection,
-            mongo_market_data_collection=mongo_market_data_collection,
-            insights_collection=mongo_insights_collection
-        )
+        try:
+            # Re-establish insights collection here to avoid global variable issues
+            mongo_insights_collection = pymongo.MongoClient("mongodb://localhost:27017/")["indian_market_scanner_db"]["insights"]
+            generate_and_store_insights(mongo_news_collection, mongo_market_data_collection, mongo_insights_collection)
+        except TypeError as e:
+            print(f"Error during insights generation: {e}. Check the generate_and_store_insights function signature.")
+            print("The function was called with: generate_and_store_insights(mongo_news_collection, mongo_market_data_collection, mongo_insights_collection)")
+        except Exception as e:
+            print(f"An unexpected error occurred during insights generation: {e}")
     else:
         print("\nFailed to connect to MongoDB. All processing aborted.")
 
