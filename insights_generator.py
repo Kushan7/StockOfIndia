@@ -28,6 +28,48 @@ def connect_to_insights_mongodb(host='localhost', port=27017, db_name='indian_ma
         return None
 
 
+def calculate_beta(market_df):
+    """
+    Calculates Beta for each sector index against the Nifty 50 as a benchmark.
+    Beta = Cov(Asset Return, Market Return) / Var(Market Return)
+    """
+    print("Calculating Beta for each sector...")
+
+    # Calculate daily returns for Nifty 50
+    nifty_50_data = market_df[market_df['symbol'] == '^NSEI'].copy()
+    nifty_50_data['nifty_return'] = nifty_50_data['close'].pct_change()
+
+    betas = {}
+
+    for symbol in market_df['symbol'].unique():
+        if symbol == '^NSEI':
+            betas[symbol] = 1.0  # Beta of market index to itself is 1
+            continue
+
+        sector_data = market_df[market_df['symbol'] == symbol].copy()
+
+        # Merge sector data with Nifty 50 data to get aligned dates
+        merged_df = pd.merge(sector_data, nifty_50_data, on='date', suffixes=('_sector', '_nifty'))
+        merged_df['sector_return'] = merged_df['close_sector'].pct_change()
+
+        # Drop NaN values that result from pct_change
+        merged_df.dropna(subset=['sector_return', 'nifty_return'], inplace=True)
+
+        if len(merged_df) > 10:  # Need sufficient data points for a meaningful beta
+            covariance = merged_df['sector_return'].cov(merged_df['nifty_return'])
+            variance = merged_df['nifty_return'].var()
+
+            if variance != 0:
+                beta = covariance / variance
+                betas[symbol] = beta
+            else:
+                betas[symbol] = np.nan
+        else:
+            betas[symbol] = np.nan
+
+    return betas
+
+
 def generate_and_store_insights(news_collection, market_data_collection, insights_collection):
     """
     Generates and stores market insights based on aggregated news sentiment
@@ -66,8 +108,6 @@ def generate_and_store_insights(news_collection, market_data_collection, insight
 
     # Rename columns for clarity
     sentiment_by_sector.rename(columns={'publication_date': 'date', 'sectors_mentioned': 'sector'}, inplace=True)
-
-    # FIX: Convert to datetime64[ns] to match market_df data type for merging
     sentiment_by_sector['date'] = pd.to_datetime(sentiment_by_sector['date'])
 
     # 3. Join sentiment with market data
@@ -98,17 +138,41 @@ def generate_and_store_insights(news_collection, market_data_collection, insight
         print("No matching news and market data found for the same date/sector. Aborting.")
         return 0
 
-    # 4. Calculate market trends (SMAs)
-    print("Calculating market trends and signals...")
+    # 4. Calculate market trends (SMAs) and Beta
+    print("Calculating market trends and new metrics...")
     insights_df.sort_values(['sector', 'date'], inplace=True)
     insights_df['sma_20'] = insights_df.groupby('sector')['close'].transform(lambda x: x.rolling(window=20).mean())
     insights_df['sma_50'] = insights_df.groupby('sector')['close'].transform(lambda x: x.rolling(window=50).mean())
 
+    # New: Calculate Beta and map it to the DataFrame
+    betas = calculate_beta(market_df)
+    insights_df['beta'] = insights_df['symbol'].map(betas)
+
+    # New: Calculate a simplified P/B ratio (for demonstrative purposes)
+    # This is a conceptual example for an index, not a true calculation
+    insights_df['pb_ratio'] = insights_df['close'] / insights_df.groupby('sector')['close'].transform(
+        lambda x: x.rolling(window=20).mean())
+
     # 5. Generate signals
     def generate_signal(row):
-        if row['avg_sentiment'] > 0.65 and row['close'] > row['sma_20'] and row['sma_20'] > row['sma_50']:
+        is_long_term_buy = (
+                row['beta'] < 1.05 and  # Lower beta suggests less volatility
+                row['pb_ratio'] < 0.95  # P/B below 1 suggests undervalued (in this simple model)
+        )
+        is_bullish_trend = (
+                row['avg_sentiment'] > 0.65 and
+                row['close'] > row['sma_20'] and
+                row['sma_20'] > row['sma_50']
+        )
+        is_bearish_trend = (
+                row['avg_sentiment'] < 0.35 and
+                row['close'] < row['sma_20'] and
+                row['sma_20'] < row['sma_50']
+        )
+
+        if is_long_term_buy and is_bullish_trend:
             return 'Buy'
-        if row['avg_sentiment'] < 0.35 and row['close'] < row['sma_20'] and row['sma_20'] < row['sma_50']:
+        if is_bearish_trend:
             return 'Sell'
         return 'Neutral'
 
