@@ -39,6 +39,7 @@ def get_db_collections():
 
 
 # --- Data Fetching and Processing ---
+# --- Data Fetching and Processing ---
 @st.cache_data(ttl=3600)  # Cache data for 1 hour to prevent constant DB reads
 def fetch_and_process_data(_news_collection, _insights_collection):
     """Fetches all necessary data and performs pre-processing for display."""
@@ -61,8 +62,9 @@ def fetch_and_process_data(_news_collection, _insights_collection):
 
     news_df['publication_date'] = pd.to_datetime(news_df['publication_date'])
 
-    # Get a list of unique sectors for the dropdown menu
-    sectors = sorted(insights_df['sector'].unique().tolist())
+    # FIX: Explicitly filter out non-string values from the sectors list before sorting
+    sectors = [s for s in insights_df['sector'].unique().tolist() if isinstance(s, str)]
+    sectors = sorted(sectors)
 
     return news_df, insights_df, sectors
 
