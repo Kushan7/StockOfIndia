@@ -14,8 +14,9 @@ from dotenv import load_dotenv
 # Import NLP processing functions from the new file
 from nlp_processor import process_and_update_sentiment, process_and_update_entities
 
-# Import market data functions from the new file
-from market_data_collector import connect_to_market_data_mongodb, fetch_historical_market_data
+# Import market data functions from the new file, aliasing the connect function
+from market_data_collector import connect_to_mongodb as connect_to_market_data_mongodb, fetch_historical_market_data
+from insights_generator import generate_and_store_insights
 
 # Import ET scraping function from et_news_scraper.py
 from et_news_scraper import scrape_economic_times_headlines
@@ -343,66 +344,6 @@ def connect_to_mongodb(host='localhost', port=27017, db_name='indian_market_scan
         return None
 
 
-def insert_article_into_mongodb(collection, article_data):
-    """
-    Inserts a single news article document into the MongoDB collection.
-    Uses update_one with upsert=True to insert if not exists, or update if exists.
-    """
-    if collection is None:
-        print("MongoDB collection not available. Skipping insertion.")
-        return False
-
-    if 'date' in article_data and isinstance(article_data['date'], str):
-        try:
-            parsed_date = dt_class.strptime(article_data['date'], '%Y-%m-%d')
-            article_data['publication_date'] = parsed_date
-        except ValueError:
-            print(f"Warning: Could not parse date '{article_data['date']}' into datetime object. Storing as string.")
-            article_data['publication_date'] = article_data['date']
-        article_data.pop('date', None)
-
-    article_data.setdefault('sentiment_score', None)
-    article_data.setdefault('companies_mentioned', [])
-    article_data.setdefault('sectors_mentioned', [])
-
-    try:
-        result = collection.update_one(
-            {'url': article_data['url']},
-            {
-                '$set': {
-                    'title': article_data.get('title'),
-                    'content': article_data.get('content'),
-                    'publication_date': article_data.get('publication_date'),
-                    'source': article_data.get('source'),
-                    'sentiment_score': article_data.get('sentiment_score'),
-                    'companies_mentioned': article_data.get('companies_mentioned'),
-                    'sectors_mentioned': article_data.get('sectors_mentioned')
-                }
-            },
-            upsert=True
-        )
-
-        if result.upserted_id:
-            print(f"Inserted new article: {article_data['title'][:50]}... (ID: {result.upserted_id})")
-            return True
-        elif result.matched_count > 0 and result.modified_count == 0:
-            print(f"Article already exists (URL: {article_data['url']}). No new insert or update needed.")
-            return False
-        elif result.matched_count > 0 and result.modified_count > 0:
-            print(f"Existing article (URL: {article_data['url']}) updated.")
-            return True
-        else:
-            print(f"MongoDB operation for URL {article_data['url']} neither inserted nor updated. Check logic.")
-            return False
-
-    except DuplicateKeyError:
-        print(f"Duplicate key error for URL: {article_data['url']}. Article already exists.")
-        return False
-    except Exception as e:
-        print(f"Error inserting/updating article {article_data.get('url', 'N/A')}: {e}")
-        return False
-
-
 def get_latest_news_date_for_et(mongo_collection, source_name):
     # This helper is needed locally for ET scraper
     return get_latest_news_date(mongo_collection, source_name)
@@ -470,25 +411,7 @@ if __name__ == "__main__":
         process_and_update_entities(mongo_news_collection)
 
         print("\n--- Phase 4: Historical Market Data ---")
-        nifty_index_tickers = [
-            '^NSEI',
-            '^NSEBANK',
-            '^CNXIT',
-            '^CNXAUTO',
-            '^CNXFMCG',
-            '^CNXMETAL',
-            '^CNXMEDIA',
-            '^CNXREALTY',
-        ]
-
-        today_date = dt_class.now()
-        start_date_hist = (today_date - timedelta(days=5 * 365)).strftime('%Y-%m-%d')
-        end_date_hist = today_date.strftime('%Y-%m-%d')
-
         total_market_data_records = fetch_historical_market_data(
-            tickers=nifty_index_tickers,
-            start_date_str=start_date_hist,
-            end_date_str=end_date_hist,
             mongo_collection=mongo_market_data_collection
         )
         if total_market_data_records > 0:
@@ -496,13 +419,23 @@ if __name__ == "__main__":
         else:
             print("\nNo new market data records collected or an error occurred.")
 
+        print("\n--- Phase 5: Generating Correlation and Insights ---")
+        mongo_insights_collection = pymongo.MongoClient("mongodb://localhost:27017/")["indian_market_scanner_db"]["insights"]
+        generate_and_store_insights(
+            mongo_news_collection=mongo_news_collection,
+            mongo_market_data_collection=mongo_market_data_collection,
+            insights_collection=mongo_insights_collection
+        )
     else:
         print("\nFailed to connect to MongoDB. All processing aborted.")
 
     print("\nProject execution complete. Check your MongoDB for:")
     print("  - News Articles (indian_market_scanner_db -> news_articles)")
     print("  - Historical Market Data (indian_market_scanner_db -> historical_market_data)")
+    print("  - Insights (indian_market_scanner_db -> insights)")
     print(
         "\nExample mongosh query for news: `use indian_market_scanner_db; db.news_articles.find({'sentiment_score': {'$ne': null}}).limit(1).pretty()`")
     print(
         "Example mongosh query for market data: `use indian_market_scanner_db; db.historical_market_data.find({'symbol': '^NSEI'}).sort({'date': -1}).limit(5).pretty()`")
+    print(
+        "Example mongosh query for insights: `use indian_market_scanner_db; db.insights.find({}).sort({'date':-1}).limit(5).pretty()`")
