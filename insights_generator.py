@@ -1,8 +1,7 @@
 # insights_generator.py
 
 import pandas as pd
-# FIX: Correct import style for datetime classes
-from datetime import datetime as dt_class, date as date_class, timedelta
+from datetime import datetime, timedelta, date as date_class
 import pymongo
 import numpy as np
 
@@ -54,8 +53,7 @@ def generate_and_store_insights(news_collection, market_data_collection, insight
 
     # Clean up dataframes
     news_df['publication_date'] = pd.to_datetime(news_df['publication_date']).dt.date
-    # FIX: Convert market_df's date to datetime.date to match sentiment dataframe
-    market_df['date'] = pd.to_datetime(market_df['date']).dt.date
+    market_df['date'] = pd.to_datetime(market_df['date'])
 
     # 2. Aggregate sentiment by sector and date
     print("Aggregating sentiment by sector and date...")
@@ -68,7 +66,9 @@ def generate_and_store_insights(news_collection, market_data_collection, insight
 
     # Rename columns for clarity
     sentiment_by_sector.rename(columns={'publication_date': 'date', 'sectors_mentioned': 'sector'}, inplace=True)
-    sentiment_by_sector['date'] = pd.to_datetime(sentiment_by_sector['date']).dt.date
+
+    # FIX: Convert to datetime64[ns] to match market_df data type for merging
+    sentiment_by_sector['date'] = pd.to_datetime(sentiment_by_sector['date'])
 
     # 3. Join sentiment with market data
     print("Joining sentiment data with market data...")
@@ -119,10 +119,8 @@ def generate_and_store_insights(news_collection, market_data_collection, insight
 
     insights_collection.delete_many({})
 
-    # FIX: Convert the date column to datetime.datetime before inserting
-    # The to_dict('records') method will now produce a list of dictionaries
-    # where the 'date' field is a datetime.datetime object, compatible with pymongo.
-    insights_df['date'] = insights_df['date'].apply(lambda x: dt_class.combine(x, dt_class.min.time()))
+    # We must ensure all columns are serializable by pymongo
+    insights_df['date'] = insights_df['date'].apply(lambda x: datetime.combine(x, datetime.min.time()))
 
     records_to_insert = insights_df.to_dict('records')
     inserted_count = 0

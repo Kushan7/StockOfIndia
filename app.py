@@ -40,12 +40,9 @@ def get_db_collections():
 
 # --- Data Fetching and Processing ---
 @st.cache_data(ttl=3600)  # Cache data for 1 hour to prevent constant DB reads
-# FIX: Add a leading underscore to the collection arguments to tell Streamlit to ignore them for caching
 def fetch_and_process_data(_news_collection, _insights_collection):
     """Fetches all necessary data and performs pre-processing for display."""
 
-    # Fetch data as a list of dicts, then convert to DataFrame
-    # Use the underscored arguments inside the function
     news_data = list(_news_collection.find().sort("publication_date", pymongo.DESCENDING))
     insights_data = list(_insights_collection.find().sort("date", pymongo.DESCENDING))
 
@@ -60,7 +57,7 @@ def fetch_and_process_data(_news_collection, _insights_collection):
     insights_df['avg_sentiment'] = pd.to_numeric(insights_df['avg_sentiment'], errors='coerce')
     insights_df['signal'].fillna('Neutral', inplace=True)
 
-    news_df['publication_date'] = pd.to_datetime(news_df['publication_date']).dt.date
+    news_df['publication_date'] = pd.to_datetime(news_df['publication_date'])
 
     # Get a list of unique sectors for the dropdown menu
     sectors = sorted(insights_df['sector'].unique().tolist())
@@ -158,7 +155,6 @@ def create_sentiment_price_chart(insights_df, selected_sector, date_range):
     return fig
 
 
-# --- Visualization Functions ---
 def display_latest_news(news_df, selected_sector, num_articles=15):
     """Displays a table of the latest news articles for the selected sector."""
     st.subheader(f"Latest News for {selected_sector}")
@@ -184,12 +180,13 @@ def display_latest_news(news_df, selected_sector, num_articles=15):
         column_config={
             "title_link": st.column_config.Column("Headline", width="medium"),
             "source": st.column_config.Column("Source", width="small"),
-            # FIX: Use st.column_config.DateColumn instead of st.column_config.Column
             "publication_date": st.column_config.DateColumn("Date", width="small", format="YYYY-MM-DD"),
-            "sentiment_score": st.column_config.ProgressColumn("Sentiment", width="small", format="%.2f", min_value=0, max_value=1)
+            "sentiment_score": st.column_config.ProgressColumn("Sentiment", width="small", format="%.2f", min_value=0,
+                                                               max_value=1)
         },
         hide_index=True
     )
+
 
 # --- Main Application Logic ---
 def main():
@@ -201,7 +198,6 @@ def main():
         st.stop()
 
     # Fetch and process data
-    # FIX: Pass the collection objects with an underscore to prevent caching error
     news_df, insights_df, sectors = fetch_and_process_data(news_collection, insights_collection)
     if insights_df is None or sectors is None:
         st.warning("No insights data found. Please run the full pipeline to generate insights.")
