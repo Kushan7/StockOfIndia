@@ -56,6 +56,8 @@ def fetch_and_process_data(_news_collection, _insights_collection):
     insights_df['date'] = pd.to_datetime(insights_df['date']).dt.date
     insights_df['avg_sentiment'] = pd.to_numeric(insights_df['avg_sentiment'], errors='coerce')
     insights_df['signal'].fillna('Neutral', inplace=True)
+    insights_df['pb_ratio'].fillna(insights_df['pb_ratio'].mean(), inplace=True)
+    insights_df['beta'].fillna(1.0, inplace=True)
 
     news_df['publication_date'] = pd.to_datetime(news_df['publication_date'])
 
@@ -155,6 +157,34 @@ def create_sentiment_price_chart(insights_df, selected_sector, date_range):
     return fig
 
 
+def create_pb_chart(insights_df, selected_sector, date_range):
+    """Creates a chart for the P/B ratio over time."""
+    filtered_df = insights_df[
+        (insights_df['sector'] == selected_sector) &
+        (insights_df['date'] >= date_range[0]) &
+        (insights_df['date'] <= date_range[1])
+        ].copy()
+
+    if filtered_df.empty:
+        return None
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=filtered_df['date'], y=filtered_df['pb_ratio'], name="P/B Ratio",
+            mode='lines', line=dict(color='lightgreen', width=2),
+            hovertemplate="Date: %{x}<br>P/B Ratio: %{y:.2f}<extra></extra>"
+        )
+    )
+    fig.update_layout(
+        title_text=f"Simplified P/B Ratio for {selected_sector}",
+        xaxis_title="Date",
+        yaxis_title="P/B Ratio",
+        hovermode="x unified"
+    )
+    return fig
+
+
 def display_latest_news(news_df, selected_sector, num_articles=15):
     """Displays a table of the latest news articles for the selected sector."""
     st.subheader(f"Latest News for {selected_sector}")
@@ -232,14 +262,35 @@ def main():
                 unsafe_allow_html=True
             )
 
+        # New: Display latest Beta and P/B Ratio
+        st.subheader("Latest Metrics")
+        if not latest_signals.empty:
+            latest_data = latest_signals[latest_signals['sector'] == selected_sector].iloc[0]
+            st.markdown(f"**Beta**: `{latest_data['beta']:.2f}`")
+            st.markdown(f"**P/B Ratio**: `{latest_data['pb_ratio']:.2f}`")
+
     # --- Main Content Area ---
     if selected_sector:
         # Create and display the price/sentiment chart
-        fig = create_sentiment_price_chart(insights_df, selected_sector, date_range)
-        st.plotly_chart(fig, use_container_width=True)
+        st.subheader(f"Dashboard for {selected_sector}")
 
-        # Display latest news for the selected sector
-        display_latest_news(news_df, selected_sector, num_articles=15)
+        # Tabs for different visualizations
+        tab1, tab2, tab3 = st.tabs(["Price & Sentiment", "P/B Ratio", "News Headlines"])
+
+        with tab1:
+            st.header("Price & Sentiment Analysis")
+            fig_price_sentiment = create_sentiment_price_chart(insights_df, selected_sector, date_range)
+            st.plotly_chart(fig_price_sentiment, use_container_width=True)
+
+        with tab2:
+            st.header("Fundamental Analysis")
+            fig_pb = create_pb_chart(insights_df, selected_sector, date_range)
+            if fig_pb:
+                st.plotly_chart(fig_pb, use_container_width=True)
+
+        with tab3:
+            st.header("Latest News Headlines")
+            display_latest_news(news_df, selected_sector, num_articles=15)
 
     st.markdown("---")
     st.info(
