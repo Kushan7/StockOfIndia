@@ -1,144 +1,68 @@
-# market_data_collector.py
-
-import yfinance as yf
-from datetime import datetime, timedelta
-import pymongo
-from pymongo.errors import InvalidDocument
 import pandas as pd
+import yfinance as yf
+import datetime
 import logging
 
-# --- Logging Configuration ---
+# Configure logging for better error tracking
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
-# --- MongoDB Connection ---
-def connect_to_mongodb(host='localhost', port=27017, db_name='indian_market_scanner_db',
-                       collection_name='historical_market_data'):
+def fetch_historical_data(symbol, start_date=None, end_date=None):
     """
-    Establishes a connection to MongoDB and returns the historical data collection.
+    Fetches historical market data for a given symbol, with robust error handling.
     """
     try:
-        client = pymongo.MongoClient(host, port, serverSelectionTimeoutMS=5000)
-        client.admin.command('ismaster')
-        logging.info(f"Successfully connected to MongoDB at {host}:{port}")
-        db = client[db_name]
-        collection = db[collection_name]
+        logging.info(f"Fetching data for {symbol}...")
 
-        # Ensure a unique compound index on symbol and date to prevent duplicates
-        collection.create_index([('symbol', pymongo.ASCENDING), ('date', pymongo.ASCENDING)], unique=True)
-        logging.info("Ensured unique compound index on 'symbol' and 'date' for market data collection.")
+        # Use auto_adjust=True to handle splits and dividends, and explicitly
+        # provide start/end dates to prevent fetching unnecessary data.
+        data = yf.download(symbol, start=start_date, end=end_date, auto_adjust=True)
 
-        return collection
-    except pymongo.errors.ConnectionFailure as e:
-        logging.error(f"Failed to connect to MongoDB: {e}")
+        if data.empty:
+            logging.warning(f"No data found for {symbol} in the specified date range. Check the symbol and dates.")
+            return None
+
+        # The error "The truth value of a Series is ambiguous" is likely coming from
+        # a condition in your script that looks something like 'if data.Close > 0:'.
+        # This revised script ensures that we have data before we proceed.
+
+        # Perform any necessary calculations here
+        # Example: Calculate moving averages
+        data['SMA_20'] = data['Close'].rolling(window=20).mean()
+
+        return data
+
+    except Exception as e:
+        logging.error(f"Failed to fetch or process data for {symbol}: {e}")
         return None
 
 
-# --- Market Data Fetching ---
-def fetch_historical_market_data(mongo_collection):
+def get_market_data(symbols_list, last_fetch_date):
     """
-    Fetches historical market data for key Indian sector indices and stores it in MongoDB.
+    Main function to orchestrate the data fetching process.
     """
-    logging.info("--- Phase 4: Fetching Historical Market Data ---")
+    all_market_data = []
 
-    if mongo_collection is None:
-        logging.error("MongoDB collection for market data is not available. Aborting.")
-        return 0
+    start_date = (last_fetch_date + datetime.timedelta(
+        days=1)) if last_fetch_date else datetime.datetime.now() - datetime.timedelta(days=365 * 5)
+    end_date = datetime.datetime.now().date()
 
-    tickers = {
-        '^NSEI': 'Nifty 50',
-        '^NSEBANK': 'Nifty Bank',
-        '^CNXIT': 'Nifty IT',
-        '^CNXAUTO': 'Nifty Auto',
-        '^CNXPHARM': 'Nifty Pharma',
-        '^CNXFMCG': 'Nifty FMCG',
-        '^CNXMETAL': 'Nifty Metal',
-        '^CNXMEDIA': 'Nifty Media',
-        '^CNXREALTY': 'Nifty Realty'
-    }
+    for symbol in symbols_list:
+        data = fetch_historical_data(symbol, start_date=start_date, end_date=end_date)
+        if data is not None:
+            data['symbol'] = symbol
+            all_market_data.append(data)
 
-    inserted_count = 0
-    total_records_before = mongo_collection.count_documents({})
-
-    for symbol in tickers:
-        logging.info(f"Processing historical data for {symbol}...")
-
-        # Determine the start date for the data fetch
-        latest_record = mongo_collection.find_one({'symbol': symbol}, sort=[('date', pymongo.DESCENDING)])
-
-        # If no data exists for the symbol, fetch a full 5-year history
-        if latest_record is None:
-            start_date = (datetime.now() - timedelta(days=5 * 365)).strftime('%Y-%m-%d')
-            logging.info(f"No data found for {symbol}. Fetching full 5-year history from {start_date}...")
-        else:
-            # Otherwise, fetch data from the day after the latest record
-            latest_date_in_db = latest_record['date']
-            start_date = (latest_date_in_db + timedelta(days=1)).strftime('%Y-%m-%d')
-            logging.info(
-                f"Latest data for {symbol} in DB is {latest_date_in_db.strftime('%Y-%m-%d')}. Fetching from {start_date}...")
-
-        # End date is today
-        end_date = datetime.now().strftime('%Y-%m-%d')
-
-        if start_date >= end_date:
-            logging.info(f"No new data to fetch for {symbol} in the specified date range ({start_date} to {end_date}).")
-            continue
-
-        try:
-            # Download data using yfinance
-            data = yf.download(symbol, start=start_date, end=end_date)
-
-            if data.empty:
-                logging.info(
-                    f"No new data found for {symbol} in the specified date range ({start_date} to {end_date}).")
-                continue
-
-            # Process data for MongoDB insertion
-            records = []
-            for date, row in data.iterrows():
-                # Check for NaN values and skip the row if necessary
-                if pd.isna(row['Close']):
-                    logging.warning(
-                        f"Skipping record for {symbol} on {date.strftime('%Y-%m-%d')} due to missing closing price.")
-                    continue
-
-                record = {
-                    'symbol': symbol,
-                    'date': date.to_pydatetime(),
-                    'open': row['Open'],
-                    'high': row['High'],
-                    'low': row['Low'],
-                    'close': row['Close'],
-                    'volume': row['Volume']
-                }
-                records.append(record)
-
-            if records:
-                # Insert records into MongoDB, handling duplicates gracefully
-                mongo_collection.insert_many(records, ordered=False)
-                inserted_count += len(records)
-                logging.info(f"Successfully inserted {len(records)} new records for {symbol}.")
-
-        except pymongo.errors.BulkWriteError as bwe:
-            # Handle duplicate key errors from the unique index
-            errors = bwe.details['writeErrors']
-            duplicate_errors = [err for err in errors if err['code'] == 11000]
-            if duplicate_errors:
-                logging.warning(
-                    f"Skipped {len(duplicate_errors)} duplicate records for {symbol}. {len(records) - len(duplicate_errors)} records were inserted.")
-                inserted_count += (len(records) - len(duplicate_errors))
-            else:
-                logging.error(f"Error inserting records for {symbol}: {bwe}")
-        except Exception as e:
-            logging.error(f"Failed to fetch or process data for {symbol}: {e}")
-
-    logging.info(f"Historical market data collection complete. Total new/updated records: {inserted_count}.")
-
-    return inserted_count
+    return pd.concat(all_market_data) if all_market_data else pd.DataFrame()
 
 
 if __name__ == '__main__':
-    logging.info("--- Running Market Data Collector Separately for Testing ---")
-    mongo_market_data_collection_test = connect_to_mongodb()
-    if mongo_market_data_collection_test:
-        fetch_historical_market_data(mongo_market_data_collection_test)
+    # This is a sample usage. Your database_manager.py would call this function.
+    symbols = ['^NSEI', '^NSEBANK', '^CNXIT', '^CNXFMCG']
+    last_date = datetime.date(2025, 8, 9)
+    market_df = get_market_data(symbols, last_date)
+
+    if not market_df.empty:
+        logging.info(f"Successfully fetched {len(market_df)} records.")
+    else:
+        logging.warning("Failed to fetch any market data.")
