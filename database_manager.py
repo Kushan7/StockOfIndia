@@ -1,5 +1,3 @@
-# database_manager.py
-
 # --- All Imports at the Top ---
 import requests
 import time
