@@ -1,236 +1,140 @@
-# insights_generator.py
-
 import pandas as pd
-from datetime import datetime, timedelta
-import pymongo
+from pymongo import MongoClient
 import numpy as np
+from datetime import datetime, timedelta
+import logging
 
-from pymongo.errors import InvalidDocument
+# --- Logging Configuration ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
-def connect_to_insights_mongodb(host='localhost', port=27017, db_name='indian_market_scanner_db',
-                                collection_name='insights'):
-    """
-    Establishes a connection to MongoDB and returns the insights collection.
-    """
+# --- MongoDB Connection ---
+def connect_to_mongodb():
+    """Establishes and returns a connection to MongoDB."""
     try:
-        client = pymongo.MongoClient(host, port, serverSelectionTimeoutMS=5000)
+        client = MongoClient("mongodb://localhost:27017/", serverSelectionTimeoutMS=5000)
         client.admin.command('ismaster')
-        print(f"Successfully connected to MongoDB for insights at {host}:{port}")
-        db = client[db_name]
-        collection = db[collection_name]
-        return collection
-    except pymongo.errors.ConnectionFailure as e:
-        print(f"Failed to connect to MongoDB for insights: {e}")
-        return None
+        return client
     except Exception as e:
-        print(f"An unexpected error occurred during MongoDB connection for insights: {e}")
+        logging.error(f"Failed to connect to MongoDB: {e}")
         return None
 
 
-def calculate_beta(market_df):
+# --- Main Insights Generator ---
+def generate_and_store_insights(news_collection, market_collection, insights_collection):
     """
-    Calculates Beta for each sector index against the Nifty 50 as a benchmark.
-    Beta = Cov(Asset Return, Market Return) / Var(Market Return)
+    Generates market insights by combining news sentiment and historical data.
     """
-    print("Calculating Beta for each sector...")
+    logging.info("--- Phase 5: Generating Correlation and Insights ---")
 
-    # Calculate daily returns for Nifty 50
-    nifty_50_data = market_df[market_df['symbol'] == '^NSEI'].copy()
-    nifty_50_data['nifty_return'] = nifty_50_data['close'].pct_change()
+    if news_collection is None or market_collection is None or insights_collection is None:
+        logging.error("MongoDB collections are not available. Aborting insights generation.")
+        return
 
-    betas = {}
+    # Fetch news and market data
+    try:
+        logging.info("Fetching news articles and market data from MongoDB...")
+        news_df = pd.DataFrame(list(news_collection.find({})))
+        market_df = pd.DataFrame(list(market_collection.find({})))
 
-    for symbol in market_df['symbol'].unique():
-        if symbol == '^NSEI':
-            betas[symbol] = 1.0  # Beta of market index to itself is 1
-            continue
+        # CRITICAL FIX: Only drop '_id' if the DataFrame is not empty
+        if not news_df.empty:
+            news_df = news_df.drop(columns=['_id'], errors='ignore')
+        if not market_df.empty:
+            market_df = market_df.drop(columns=['_id'], errors='ignore')
 
-        sector_data = market_df[market_df['symbol'] == symbol].copy()
-
-        # Merge sector data with Nifty 50 data to get aligned dates
-        merged_df = pd.merge(sector_data, nifty_50_data, on='date', suffixes=('_sector', '_nifty'))
-        merged_df['sector_return'] = merged_df['close_sector'].pct_change()
-
-        # Drop NaN values that result from pct_change
-        merged_df.dropna(subset=['sector_return', 'nifty_return'], inplace=True)
-
-        if len(merged_df) > 10:  # Need sufficient data points for a meaningful beta
-            covariance = merged_df['sector_return'].cov(merged_df['nifty_return'])
-            variance = merged_df['nifty_return'].var()
-
-            if variance != 0 and not pd.isna(covariance) and not pd.isna(variance):
-                beta = covariance / variance
-                betas[symbol] = beta
-            else:
-                betas[symbol] = np.nan
-        else:
-            betas[symbol] = np.nan
-
-    return betas
+        # Ensure date columns are in datetime format and timezone-naive
+        if not news_df.empty and 'publishedAt' in news_df.columns:
+            news_df['publishedAt'] = pd.to_datetime(news_df['publishedAt']).dt.tz_localize(None)
+        if not market_df.empty and 'date' in market_df.columns:
+            market_df['date'] = pd.to_datetime(market_df['date']).dt.tz_localize(None)
 
 
-def generate_and_store_insights(news_collection, market_data_collection, insights_collection):
-    """
-    Generates and stores market insights based on aggregated news sentiment
-    and historical market data.
-    """
-    print("\n--- Phase 5: Generating Correlation and Insights ---")
-
-    if news_collection is None or market_data_collection is None or insights_collection is None:
-        print("Required MongoDB collections are not available. Aborting insight generation.")
-        return 0
-
-    # 1. Fetch data from MongoDB
-    print("Fetching news articles and market data from MongoDB...")
-    news_data = list(news_collection.find({'sentiment_score': {'$ne': None}}))
-    market_data = list(market_data_collection.find())
-
-    news_df = pd.DataFrame(news_data).drop(columns=['_id'])
-    market_df = pd.DataFrame(market_data).drop(columns=['_id'])
+    except Exception as e:
+        logging.error(f"An unexpected error occurred during insights generation: {e}")
+        return
 
     if news_df.empty or market_df.empty:
-        print("Not enough data to generate insights. Please run the data collectors first.")
-        return 0
+        logging.warning("News or market data is empty. Cannot generate insights.")
+        return
 
-    # Clean up dataframes
-    news_df['publication_date'] = pd.to_datetime(news_df['publication_date']).dt.date
-    market_df['date'] = pd.to_datetime(market_df['date'])
+    # --- Data Processing and Insight Generation ---
 
-    # 2. Aggregate sentiment by sector and date
-    print("Aggregating sentiment by sector and date...")
-    sentiment_by_sector = news_df.explode('sectors_mentioned').groupby(
-        ['publication_date', 'sectors_mentioned']
-    ).agg(
-        avg_sentiment=('sentiment_score', 'mean'),
-        num_articles=('sentiment_score', 'count')
-    ).reset_index()
-
-    # Rename columns for clarity
-    sentiment_by_sector.rename(columns={'publication_date': 'date', 'sectors_mentioned': 'sector'}, inplace=True)
-    sentiment_by_sector['date'] = pd.to_datetime(sentiment_by_sector['date'])
-
-    # 3. Create a full time series from market data first
-    print("Creating a full time series and calculating trends...")
-
-    sector_to_ticker_mapping = {
-        'Banking & Financial Services': '^NSEBANK',
-        'Information Technology': '^CNXIT',
-        'Automobile': '^CNXAUTO',
-        'Healthcare & Pharma': '^CNXPHARM',
-        'FMCG': '^CNXFMCG',
-        'Metals & Mining': '^CNXMETAL',
-        'Media & Entertainment': '^CNXMEDIA',
-        'Real Estate': '^CNXREALTY'
-    }
-
-    ticker_to_sector_mapping = {v: k for k, v in sector_to_ticker_mapping.items()}
-
-    market_df['sector'] = market_df['symbol'].map(ticker_to_sector_mapping)
-    market_df.sort_values(['sector', 'date'], inplace=True)
-
-    # Calculate SMAs on the full historical market data
-    market_df['sma_20'] = market_df.groupby('sector')['close'].transform(lambda x: x.rolling(window=20).mean())
-    market_df['sma_50'] = market_df.groupby('sector')['close'].transform(lambda x: x.rolling(window=50).mean())
-
-    # Calculate Beta and map it to the DataFrame
-    betas = calculate_beta(market_df)
-    market_df['beta'] = market_df['symbol'].map(betas)
-
-    # Calculate a price to SMA(50) ratio
-    market_df['price_to_sma_50_ratio'] = market_df['close'] / market_df['sma_50']
-
-    # 4. Perform a LEFT JOIN with the sentiment data
-    print("Joining sentiment data with full market data...")
-    insights_df = pd.merge(
-        market_df,
-        sentiment_by_sector,
-        on=['date', 'sector'],
-        how='left'
-    )
-
-    # Fill NaN values for days with no news
-    insights_df['avg_sentiment'].fillna(0.5, inplace=True)
-    insights_df['num_articles'].fillna(0, inplace=True)
-
-    if insights_df.empty:
-        print("No matching news and market data found for the same date/sector. Aborting.")
-        return 0
-
-    # 5. Generate signals
-    def generate_signal(row):
-        is_long_term_buy = (
-                row['beta'] < 1.05 and  # Lower beta suggests less volatility
-                row['price_to_sma_50_ratio'] < 0.95  # Below 1 suggests undervaluation
-        )
-        is_bullish_trend = (
-                row['avg_sentiment'] > 0.65 and
-                row['close'] > row['sma_20'] and
-                row['sma_20'] > row['sma_50']
-        )
-        is_bearish_trend = (
-                row['avg_sentiment'] < 0.35 and
-                row['close'] < row['sma_20'] and
-                row['sma_20'] < row['sma_50']
-        )
-
-        if is_long_term_buy and is_bullish_trend:
-            return 'Buy'
-        if is_bearish_trend:
-            return 'Sell'
-        return 'Neutral'
-
-    insights_df['signal'] = insights_df.apply(generate_signal, axis=1)
-
-    # 6. Store final insights in a new collection
-    print("Storing final insights in MongoDB...")
-
-    insights_collection.delete_many({})
-
-    # We must ensure all columns are serializable by pymongo
-    insights_df['date'] = insights_df['date'].apply(lambda x: datetime.combine(x, datetime.min.time()))
-
-    records_to_insert = insights_df.to_dict('records')
-    inserted_count = 0
-    if records_to_insert:
-        try:
-            insights_collection.insert_many(records_to_insert)
-            inserted_count = len(records_to_insert)
-            print(f"Successfully inserted {inserted_count} insight records.")
-        except InvalidDocument as e:
-            print(f"Error inserting insights into DB: InvalidDocument: {e}. Check data types.")
-        except Exception as e:
-            print(f"Error inserting insights into DB: {e}")
-
-    return inserted_count
-
-
-# --- Test execution block (run independently) ---
-if __name__ == '__main__':
-    print("--- Running Insights Generator Separately for Testing ---")
-    print("NOTE: This requires 'news_articles' and 'historical_market_data' collections to be pre-populated.")
-
-
-    def mock_connect_to_db(db_name, collection_name):
-        try:
-            client = pymongo.MongoClient("mongodb://localhost:27017/")
-            db = client[db_name]
-            return db[collection_name]
-        except Exception as e:
-            print(f"Mock DB connection failed: {e}")
-            return None
-
-
-    mongo_news_collection_test = mock_connect_to_db("indian_market_scanner_db", "news_articles")
-    mongo_market_data_collection_test = mock_connect_to_db("indian_market_scanner_db", "historical_market_data")
-    mongo_insights_collection_test = mock_connect_to_db("indian_market_scanner_db", "insights")
-
-    if mongo_news_collection_test is not None and mongo_market_data_collection_test is not None and mongo_insights_collection_test is not None:
-        total_insights_generated = generate_and_store_insights(
-            mongo_news_collection_test,
-            mongo_market_data_collection_test,
-            mongo_insights_collection_test
-        )
-        print(f"Total insights generated and stored: {total_insights_generated}")
+    # Aggregate sentiment by symbol and date
+    if 'symbol' in news_df.columns and 'sentiment_score' in news_df.columns and 'publishedAt' in news_df.columns:
+        news_df['date'] = news_df['publishedAt'].dt.floor('d')
+        daily_sentiment = news_df.groupby(['symbol', 'date']).agg(
+            avg_sentiment=('sentiment_score', 'mean'),
+            num_articles=('sentiment_score', 'count')
+        ).reset_index()
+        logging.info("Aggregated sentiment by sector and date.")
     else:
-        print("Test collections not available. Aborting.")
+        logging.warning("Skipping sentiment aggregation due to missing columns in news data.")
+        daily_sentiment = pd.DataFrame(columns=['symbol', 'date', 'avg_sentiment', 'num_articles'])
+
+    # Create a full time series for all symbols in the market data
+    if 'symbol' in market_df.columns and 'date' in market_df.columns:
+        all_dates = pd.to_datetime(market_df['date'].unique())
+        all_symbols = market_df['symbol'].unique()
+        full_index = pd.MultiIndex.from_product([all_symbols, all_dates], names=['symbol', 'date'])
+        full_df = pd.DataFrame(index=full_index).reset_index()
+
+        # Join market data with the full time series
+        insights_df = pd.merge(full_df, market_df, on=['symbol', 'date'], how='left')
+        logging.info("Creating a full time series and calculating trends...")
+    else:
+        logging.warning("Skipping time series creation due to missing columns in market data.")
+        insights_df = pd.DataFrame(columns=['symbol', 'date'])
+
+    # Calculate beta for each sector/symbol
+    if 'close' in insights_df.columns:
+        insights_df['close'].fillna(method='ffill', inplace=True)
+        insights_df['daily_return'] = insights_df.groupby('symbol')['close'].pct_change()
+        market_return = insights_df[insights_df['symbol'] == '^NSEI']['daily_return'].rename('market_return')
+        insights_df = insights_df.merge(market_return, on='date', how='left')
+
+        def calculate_beta(group):
+            if len(group) > 20 and group['market_return'].var() > 0:
+                covariance = group['daily_return'].cov(group['market_return'])
+                market_variance = group['market_return'].var()
+                return covariance / market_variance
+            return np.nan
+
+        insights_df['beta'] = insights_df.groupby('symbol').apply(calculate_beta).reset_index(level=0, drop=True)
+        logging.info("Calculating Beta for each sector.")
+
+        insights_df['sma_20'] = insights_df.groupby('symbol')['close'].rolling(window=20).mean().reset_index(level=0,
+                                                                                                             drop=True)
+        insights_df['price_to_sma_20_ratio'] = insights_df['close'] / insights_df['sma_20']
+
+    # Join sentiment data with the full market data
+    if not daily_sentiment.empty:
+        insights_df = pd.merge(insights_df, daily_sentiment, on=['symbol', 'date'], how='left')
+        logging.info("Joining sentiment data with full market data.")
+    else:
+        insights_df['avg_sentiment'] = np.nan
+        insights_df['num_articles'] = np.nan
+
+    if 'avg_sentiment' in insights_df.columns:
+        insights_df['avg_sentiment'] = insights_df['avg_sentiment'].fillna(0.5)
+    if 'num_articles' in insights_df.columns:
+        insights_df['num_articles'] = insights_df['num_articles'].fillna(0)
+
+    # Store final insights in MongoDB
+    if not insights_df.empty:
+        insights_records = insights_df.to_dict('records')
+        try:
+            insights_collection.insert_many(insights_records, ordered=False)
+            logging.info(f"Successfully inserted {len(insights_records)} insight records.")
+        except Exception as e:
+            logging.error(f"Error storing final insights in MongoDB: {e}")
+    else:
+        logging.warning("No insights generated to store in MongoDB.")
+
+
+if __name__ == '__main__':
+    logging.info("--- Running Insights Generator Separately for Testing ---")
+    client = connect_to_mongodb()
+    if client:
+        db = client['indian_market_scanner_db']
+        generate_and_store_insights(db['news_articles'], db['historical_market_data'], db['insights'])
