@@ -1,7 +1,7 @@
 import yfinance as yf
 from datetime import datetime, timedelta
 import pymongo
-from pymongo.errors import InvalidDocument
+from pymongo.errors import InvalidDocument, BulkWriteError
 import pandas as pd
 import logging
 import time
@@ -23,7 +23,6 @@ def connect_to_mongodb(host='localhost', port=27017, db_name='indian_market_scan
         db = client[db_name]
         collection = db[collection_name]
 
-        # Ensure a unique compound index on symbol and date to prevent duplicates
         collection.create_index([('symbol', pymongo.ASCENDING), ('date', pymongo.ASCENDING)], unique=True)
         logging.info("Ensured unique compound index on 'symbol' and 'date' for market data collection.")
 
@@ -60,21 +59,17 @@ def fetch_historical_market_data(mongo_collection):
     for symbol in tickers:
         logging.info(f"Processing historical data for {symbol}...")
 
-        # Determine the start date for the data fetch
         latest_record = mongo_collection.find_one({'symbol': symbol}, sort=[('date', pymongo.DESCENDING)])
 
-        # If no data exists for the symbol, fetch a full 5-year history
         if latest_record is None:
             start_date = (datetime.now() - timedelta(days=5 * 365)).strftime('%Y-%m-%d')
             logging.info(f"No data found for {symbol}. Fetching full 5-year history from {start_date}...")
         else:
-            # Otherwise, fetch data from the day after the latest record
             latest_date_in_db = latest_record['date']
             start_date = (latest_date_in_db + timedelta(days=1)).strftime('%Y-%m-%d')
             logging.info(
                 f"Latest data for {symbol} in DB is {latest_date_in_db.strftime('%Y-%m-%d')}. Fetching from {start_date}...")
 
-        # End date is today
         end_date = datetime.now().strftime('%Y-%m-%d')
 
         if start_date >= end_date:
@@ -82,18 +77,15 @@ def fetch_historical_market_data(mongo_collection):
             continue
 
         try:
-            # Download data using yfinance
             data = yf.download(symbol, start=start_date, end=end_date, auto_adjust=True)
 
+            # --- FIX: Check if DataFrame is empty using .empty attribute ---
             if data.empty:
-                logging.warning(
-                    f"yfinance returned no data for {symbol}. Skipping to the next symbol.")
+                logging.warning(f"yfinance returned no data for {symbol}. Skipping to the next symbol.")
                 continue
 
-            # Process data for MongoDB insertion
             records = []
             for date, row in data.iterrows():
-                # Check for NaN values and skip the row if necessary
                 if pd.isna(row['Close']):
                     logging.warning(
                         f"Skipping record for {symbol} on {date.strftime('%Y-%m-%d')} due to missing closing price.")
@@ -112,29 +104,26 @@ def fetch_historical_market_data(mongo_collection):
                 records.append(record)
 
             if records:
-                # Insert records into MongoDB, handling duplicates gracefully
-                mongo_collection.insert_many(records, ordered=False)
-                inserted_count += len(records)
-                logging.info(f"Successfully inserted {len(records)} new records for {symbol}.")
+                try:
+                    mongo_collection.insert_many(records, ordered=False)
+                    inserted_count += len(records)
+                    logging.info(f"Successfully inserted {len(records)} new records for {symbol}.")
+                except BulkWriteError as bwe:
+                    errors = bwe.details['writeErrors']
+                    duplicate_errors = [err for err in errors if err['code'] == 11000]
+                    if duplicate_errors:
+                        logging.warning(
+                            f"Skipped {len(duplicate_errors)} duplicate records for {symbol}. {len(records) - len(duplicate_errors)} records were inserted.")
+                        inserted_count += (len(records) - len(duplicate_errors))
+                    else:
+                        logging.error(f"Error inserting records for {symbol}: {bwe}")
 
-            # Be a good citizen and add a small delay between API calls
             time.sleep(2)
 
-        except pymongo.errors.BulkWriteError as bwe:
-            # Handle duplicate key errors from the unique index
-            errors = bwe.details['writeErrors']
-            duplicate_errors = [err for err in errors if err['code'] == 11000]
-            if duplicate_errors:
-                logging.warning(
-                    f"Skipped {len(duplicate_errors)} duplicate records for {symbol}. {len(records) - len(duplicate_errors)} records were inserted.")
-                inserted_count += (len(records) - len(duplicate_errors))
-            else:
-                logging.error(f"Error inserting records for {symbol}: {bwe}")
         except Exception as e:
             logging.error(f"Failed to fetch or process data for {symbol}: {e}")
 
     logging.info(f"Historical market data collection complete. Total new/updated records: {inserted_count}.")
-
     return inserted_count
 
 
